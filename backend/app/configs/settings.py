@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     AGENT_MAX_TOKENS: int = 4096
     AGENT_TEMPERATURE: float = 0.3
 
+    # Vision Configuration
+    VISION_MODEL_OVERRIDE: str = ""
+    VISION_MAX_IMAGE_SIZE_MB: int = 5
+    VISION_EXTRACTION_TEMPERATURE: float = 0.1
+
+    # Semantic Mapping Configuration
+    SEMANTIC_MAPPING_ENABLED: bool = True
+    SEMANTIC_MAPPING_MODEL: str = ""
+    SEMANTIC_MAPPING_TEMPERATURE: float = 0.0
+    SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD: float = 0.7
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

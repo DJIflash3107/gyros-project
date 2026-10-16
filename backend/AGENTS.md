@@ -28,6 +28,8 @@ Read it fully before modifying any code.
 19. [Adding a New Entity (Checklist)](#19-adding-a-new-entity-checklist)
 20. [AI Integration (AMD Token Factory)](#20-ai-integration-amd-token-factory)
 21. [Business Operations Agent (LangGraph)](#21-business-operations-agent-langgraph)
+22. [Sales Report Processing & Staging Workflow](#22-sales-report-processing--staging-workflow)
+23. [Dynamic Profiling & LLM Semantic Mapping](#23-dynamic-profiling--llm-semantic-mapping)
 
 ---
 
@@ -54,7 +56,8 @@ All endpoints live under the `/api/v1/` prefix.
 | Password hashing | `bcrypt` |
 | Migrations | Alembic |
 | Agent & LLM orchestration | LangGraph 0.4+, LangChain Core 0.3+, LangChain OpenAI 0.3+ |
-| LLM Gateway / Provider | AMD Token Factory (OpenAI-compatible) |
+| LLM Gateway / Provider | AMD Token Factory (OpenAI-compatible, vision & chat) |
+| Spreadsheet parsing | `openpyxl` 3.1+ (Excel .xlsx), `csv` stdlib (CSV) |
 | Testing | `pytest` + `pytest-asyncio`, `httpx` via `TestClient` |
 | Python version | 3.11+ |
 
@@ -76,13 +79,18 @@ backend/
 │   │   ├── amd_client.py     # AMD Token Factory client (retries, backoff, streaming)
 │   │   ├── database.py       # Engine, Base, SessionLocal, get_db()
 │   │   ├── security.py       # hash_password, verify_password, create/decode_access_token
-│   │   └── settings.py       # Pydantic Settings class (reads from .env)
+│   │   └── settings.py       # Pydantic Settings (DB, JWT, AMD, Agent, Vision, Semantic Mapping)
 │   ├── handlers/
-│   │   ├── agent_handler.py      # Agent streaming chat handler (SSE StreamingResponse)
-│   │   ├── ai_handler.py         # AI endpoints handler (models, health, completions)
-│   │   └── <entity>_handler.py   # HTTP-layer functions (request → response)
+│   │   ├── agent_handler.py                  # Agent streaming chat handler (SSE StreamingResponse)
+│   │   ├── ai_handler.py                     # AI endpoints handler (models, health, completions)
+│   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
+│   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates
+│   │   ├── sales_report_observation_handler.py# Confirmed sales observation queries
+│   │   ├── import_issue_handler.py           # Import validation issue queries
+│   │   ├── product_alias_handler.py          # Product alias management
+│   │   └── <entity>_handler.py               # HTTP-layer functions (request → response)
 │   ├── helpers/
-│   │   ├── error_codes.py    # ErrorCodeRegistry + generate_error_code()
+│   │   ├── error_codes.py    # ErrorCodeRegistry (standard, AI, agent, report processing codes)
 │   │   ├── exceptions.py     # AppException hierarchy (includes AIServiceException, etc.)
 │   │   ├── logging.py        # setup_logging(), logger, request_id_var, error_code_var
 │   │   ├── pagination.py     # paginate() helper
@@ -93,33 +101,60 @@ backend/
 │   ├── models/
 │   │   ├── __init__.py       # Imports all ORM models so Alembic can discover them
 │   │   ├── types.py          # BigIntId, IntUnsigned — dialect-aware column types
-│   │   ├── <entity>.py       # One file per SQLAlchemy model
-│   │   └── schemas/
-│   │       ├── agent.py      # Pydantic schemas for SSE events and chat request
-│   │       ├── ai.py         # Pydantic schemas for AI models, health, and chat
-│   │       └── <entity>.py   # Pydantic schemas for that entity
+│   │   ├── sales_report_submission.py   # Ingestion submissions (status, sha256, counters)
+│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, review status)
+│   │   ├── sales_report_observation.py  # Confirmed observations (unique business/branch/product/period)
+│   │   ├── import_issue.py              # Staging validation & extraction issues
+│   │   ├── product_alias.py             # Raw name to product alias mapping
+│   │   └── <entity>.py       # One file per SQLAlchemy model
+│   ├── models/schemas/
+│   │   ├── agent.py                  # Pydantic schemas for SSE events and chat request
+│   │   ├── ai.py                     # Pydantic schemas for AI models, health, and chat
+│   │   ├── sales_report_processing.py # ManualFormBatchCreate, ProcessingResultResponse, SSE schemas
+│   │   ├── sales_report_submission.py # Submission Create/Update/Response
+│   │   ├── sales_report_staging_row.py# Staging row Create/Update/Response
+│   │   ├── sales_report_observation.py# Confirmed observation schemas
+│   │   ├── import_issue.py           # Import issue schemas
+│   │   ├── product_alias.py          # Product alias schemas
+│   │   └── <entity>.py               # Pydantic schemas for that entity
 │   ├── routes/
-│   │   ├── __init__.py       # Re-exports all routers (including agent_router, ai_router)
-│   │   ├── agent_routes.py   # /api/v1/agent routes (POST chat)
-│   │   ├── ai_routes.py      # /api/v1/ai routes (models, health, chat)
-│   │   └── <entity>_routes.py    # APIRouter + path declarations
+│   │   ├── __init__.py                   # Re-exports all routers
+│   │   ├── agent_routes.py               # /api/v1/agent routes (POST chat)
+│   │   ├── ai_routes.py                  # /api/v1/ai routes (models, health, chat)
+│   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
+│   │   ├── sales_report_staging_row_routes.py
+│   │   ├── sales_report_observation_routes.py
+│   │   ├── import_issue_routes.py
+│   │   ├── product_alias_routes.py
+│   │   └── <entity>_routes.py            # APIRouter + path declarations
 │   ├── services/
-│   │   ├── agent_service.py  # LangGraph astream_events orchestration & SSE streaming
-│   │   ├── ai_service.py     # AI discovery, capability inference, chat logic
-│   │   └── <entity>_service.py   # Business logic and DB interaction
+│   │   ├── agent_service.py                  # LangGraph astream_events orchestration & SSE streaming
+│   │   ├── ai_service.py                     # AI discovery, capability inference, chat logic
+│   │   ├── sales_report_processing_service.py # Orchestrator: spreadsheet/photo/form -> staging
+│   │   ├── input_profiler.py                 # Structural profiler (headers, types, sample data, merged cells)
+│   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapping
+│   │   ├── spreadsheet_parser.py             # Excel/CSV parser with dynamic mapping + static fallback
+│   │   ├── photo_extractor.py                # AMD VLM extraction with SSE progress streaming
+│   │   ├── validation_engine.py              # 10-step centralized validation & alias resolution
+│   │   ├── sales_report_submission_service.py # Submissions CRUD & atomic observation confirmation
+│   │   ├── sales_report_staging_row_service.py# Staging row persistence & status updates
+│   │   ├── sales_report_observation_service.py# Confirmed observations & overlap checks
+│   │   ├── import_issue_service.py           # Issue persistence
+│   │   ├── product_alias_service.py          # Alias resolution
+│   │   └── <entity>_service.py               # Business logic and DB interaction
 │   └── main.py               # FastAPI app, lifespan, middleware, exception handlers, router mounts
 ├── alembic/
 │   ├── env.py                # Alembic environment (imports Base from configs.database)
 │   └── versions/             # Migration scripts
 ├── tests/
-│   ├── conftest.py           # In-memory SQLite fixtures (app, client, db, auth_user, second_user)
-│   ├── test_agent_auth.py    # Agent auth & cross-tenant isolation tests
-│   ├── test_agent_graph.py   # LangGraph state & graph unit tests
-│   ├── test_agent_streaming.py # SSE streaming, deltas, timeouts, disconnects
-│   ├── test_agent_tools.py   # Read-only tools, zero writes, tenant filter tests
-│   ├── test_ai_endpoints.py  # Tests for /api/v1/ai routes
-│   ├── test_amd_client.py    # Tests for AMDTokenFactoryClient
-│   └── test_*.py             # Feature-grouped test files
+│   ├── conftest.py                       # In-memory SQLite fixtures (app, client, db, users)
+│   ├── test_agent_*.py                   # Agent auth, graph, streaming, and tool suites
+│   ├── test_ai_endpoints.py              # Tests for /api/v1/ai routes
+│   ├── test_amd_client.py                # Tests for AMDTokenFactoryClient
+│   ├── test_sales_report_processing.py   # Multi-channel ingestion, validation, and confirmation tests
+│   ├── test_semantic_mapping.py          # Profiler, LLM semantic mapper, and fallback tests
+│   ├── test_sales_submissions.py         # Submissions CRUD and review lifecycle
+│   └── test_*.py                         # Feature-grouped test files
 ├── .env                      # Local secrets (git-ignored)
 ├── .env.example              # Template for .env
 ├── alembic.ini
@@ -185,6 +220,17 @@ AGENT_MAX_TURNS=10               # Max tool round-trips per conversation turn
 AGENT_REQUEST_TIMEOUT=120        # Max total execution time in seconds
 AGENT_MAX_TOKENS=4096            # Max generation tokens per response
 AGENT_TEMPERATURE=0.3            # Conservative temperature for business ops
+
+# Vision Configuration (Photo Extraction)
+VISION_MODEL_OVERRIDE=""         # Force specific vision model (empty = auto-discover)
+VISION_MAX_IMAGE_SIZE_MB=5       # Max photo upload size
+VISION_EXTRACTION_TEMPERATURE=0.1 # Low temperature for accurate OCR
+
+# Semantic Mapping Configuration (Dynamic Column Profiling)
+SEMANTIC_MAPPING_ENABLED=true    # Toggle LLM dynamic mapping
+SEMANTIC_MAPPING_MODEL=""        # Model for column mapping (empty = AMD_DEFAULT_MODEL)
+SEMANTIC_MAPPING_TEMPERATURE=0.0 # Deterministic schema mapping
+SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD=0.7 # Minimum confidence score threshold
 ```
 
 Import via:
@@ -531,6 +577,30 @@ Each log line automatically includes the `request_id` (correlation ID) set by
     - `ERR-AGT-499`: Client disconnected during processing
     - `ERR-AGT-500`: Internal agent / graph error
     - `ERR-AGT-503`: Agent service unavailable (unconfigured key or LLM down)
+  - Sales Report Ingestion & Processing:
+    - `ERR-RPT-001`: Malformed or corrupt file bytes
+    - `ERR-RPT-002`: Empty file (no data rows found)
+    - `ERR-RPT-003`: File exceeds size limit (>10 MB)
+    - `ERR-RPT-004`: Unsupported MIME type for input method
+    - `ERR-RPT-005`: Duplicate submission detected (SHA-256 match)
+    - `ERR-RPT-006`: Row or cell parse failure
+    - `ERR-RPT-010`: Vision model unavailable / unconfigured
+    - `ERR-RPT-011`: Vision model extraction failed / invalid output
+    - `ERR-RPT-012`: Image exceeds size limit (>5 MB)
+    - `ERR-RPT-020`: Semantic column mapping failed
+    - `ERR-RPT-021`: Low confidence column mapping (< threshold)
+    - `ERR-RPT-099`: Generic report processing error
+  - Validation Engine Issue Codes (recorded on `ImportIssue`):
+    - `RPT-VAL-001`: Product resolution failure (error)
+    - `RPT-VAL-002`: Branch does not exist or inactive (error)
+    - `RPT-VAL-003`: Invalid period date range (error)
+    - `RPT-VAL-004`: Date outside submission coverage window (warning)
+    - `RPT-VAL-005`: Granularity inconsistent with period (warning)
+    - `RPT-VAL-006`: Negative quantity or revenue (error)
+    - `RPT-VAL-007`: Intra-submission duplicate row (warning)
+    - `RPT-VAL-008`: Cross-submission overlap with existing active observation (warning)
+    - `RPT-VAL-009`: Stock balance inconsistency (info)
+    - `RPT-VAL-010`: Revenue plausibility warning (info)
 - `generate_error_code()` produces random `ERR-XXXXX` codes for unexpected errors.
 - Set `error_code_var` when you want the code to appear in the log line:
 
@@ -612,6 +682,9 @@ pytest tests/test_agent_auth.py tests/test_agent_tools.py tests/test_agent_graph
 
 # Run AI provider tests
 pytest tests/test_amd_client.py tests/test_ai_endpoints.py -v
+
+# Run sales report processing and semantic mapping tests
+pytest tests/test_sales_report_processing.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
 ```
 
 ### Rules
@@ -846,3 +919,170 @@ AGENT_TEMPERATURE=0.3
 # Run full project test suite
 .venv/Scripts/python -m pytest -v
 ```
+
+---
+
+## 22. Sales Report Processing & Staging Workflow
+
+The backend supports multi-channel ingestion of sales reports across spreadsheets (`.xlsx`, `.xls`, `.csv`), batch manual forms, and sales-record photos. All extracted data flows through a **staging-only** pipeline that enforces data integrity, tenant isolation, and explicit human confirmation before final observations are created.
+
+### Architecture Overview
+
+```
+                      Client Upload / Submission
+                                 │
+     ┌───────────────────────────┼───────────────────────────┐
+     ▼                           ▼                           ▼
+Spreadsheet (.xlsx/.csv)   Batch Manual Form           Photo / Receipt Image
+(POST .../process)         (POST .../batch_form)       (POST .../process [SSE])
+     │                           │                           │
+     ▼                           ▼                           ▼
+input_profiler.py                │                     photo_extractor.py
+     │                           │                     (AMD Vision VLM)
+     ▼                           │                           │
+semantic_mapper.py               │                           │
+(AMD Token Factory)              │                           │
+     │                           │                           │
+     ▼                           │                           │
+spreadsheet_parser.py            │                           │
+     │                           │                           │
+     └───────────────────────────┼───────────────────────────┘
+                                 ▼
+                       validation_engine.py
+              (10 business integrity checks + alias resolution)
+                                 │
+                                 ▼
+                      SalesReportSubmission
+                     (status: "reviewed")
+                                 │
+                       1:N Staging Rows
+                     SalesReportStagingRow
+        (review_status: "ready" | "pending_review" | "needs_correction")
+                                 │
+                                 │ (User reviews staging rows)
+                                 │ (Explicit POST .../confirm)
+                                 ▼
+                     sales_report_submission_service.py
+                           (confirm_submission)
+                                 │
+                                 ▼
+                     SalesReportObservation
+                 (Immutable confirmed observation)
+```
+
+### Ingestion Channels
+
+| Input Method | Endpoint | Payload Format | Limits & Handling |
+|---|---|---|---|
+| `spreadsheet` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`.xlsx`, `.xls`, `.csv`) | Max 10 MB. SHA-256 duplicate detection. Automatically profiles layout and performs LLM semantic mapping. |
+| `form` (batch) | `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` | `application/json` (`ManualFormBatchCreate`) | 1 to 500 rows per batch. Direct DB staging with product alias resolution and full validation. |
+| `photo` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`image/jpeg`, `image/png`, `image/webp`) | Max 5 MB. Requires vision-capable AMD model. Always streams real-time SSE progress events. |
+
+### Core Safety Invariants
+
+1. **Staging-Only Invariant:** Extraction outputs are **ALWAYS** stored as `SalesReportStagingRow`. Raw inputs are never converted directly into `SalesReportObservation`.
+2. **Never Auto-Confirm OCR/Vision Data:** Vision-extracted rows are forced to `review_status="pending_review"` regardless of score to mandate human verification.
+3. **Strict Human Confirmation:** Staging rows become confirmed observations only via an explicit authenticated call to `POST .../sales_report_submissions/{submission_id}/confirm`.
+4. **Needs Correction Exclusion:** Rows with `review_status="needs_correction"` are skipped and excluded from observation creation during confirmation.
+5. **Atomic Finalization:** Confirmation executes in a single database transaction. If any observation fails constraint validation, the entire transaction rolls back.
+6. **SHA-256 De-duplication:** Submissions compute SHA-256 digests of uploaded files to block duplicate ingestion of active submissions.
+7. **Cross-Submission Overlap Protection:** The validation engine compares proposed staging periods against confirmed `SalesReportObservation` records to prevent double-counting.
+
+### Centralized Validation Engine (`validation_engine.py`)
+
+Validation executes 10 sequential checks on all rows across all channels:
+
+1. `RPT-VAL-001` (Error): **Product resolution** — Resolves `raw_product_name` against exact active products, then case-insensitive `ProductAlias` mappings.
+2. `RPT-VAL-002` (Error): **Branch existence** — Validates that `branch_id` belongs to the target business and is active.
+3. `RPT-VAL-003` (Error): **Date validity** — Ensures `period_start <= period_end` and dates are valid.
+4. `RPT-VAL-004` (Warning): **Coverage window** — Verifies row dates lie within submission `coverage_start` and `coverage_end`.
+5. `RPT-VAL-005` (Warning): **Granularity match** — Confirms `granularity` matches `report_period_type` or period span.
+6. `RPT-VAL-006` (Error): **Quantity bounds** — Validates non-negative values for all quantities and recorded revenue.
+7. `RPT-VAL-007` (Warning): **Intra-submission duplicates** — Detects duplicate `(product_id, branch_id, period_start, period_end)` tuples within the same submission.
+8. `RPT-VAL-008` (Warning): **Cross-submission overlap** — Checks if an active `SalesReportObservation` already covers the same entity and period.
+9. `RPT-VAL-009` (Info): **Stock balance consistency** — Compares `opening_stock + received` against `available_stock`.
+10. `RPT-VAL-010` (Info): **Revenue plausibility** — Flags rows with recorded revenue when `sold_qty == 0`.
+
+### Review Status Assignment
+
+- `ready` — All validations pass with zero issues. Eligible for one-click confirmation.
+- `pending_review` — Contains warnings, info notices, or originated from vision/OCR. Eligible for confirmation after user inspection.
+- `needs_correction` — Contains one or more error-level issues (e.g., unresolved product, invalid branch). Blocked from confirmation until corrected.
+
+### SSE Progress Streaming (Photo Ingestion)
+
+When processing photos or when `stream=true`, the endpoint returns a `text/event-stream` with structured progress events:
+
+1. `report_status` (`step: "uploading" | "extracting" | "validating" | "staging" | "complete" | "failed"`)
+2. `extraction_progress` (`message: "..."`)
+3. `validation_result` (`total`, `ready`, `pending_review`, `needs_correction`, `errors`)
+4. `report_complete` (`submission_id`, `total_rows`, `accepted_rows`, `rejected_rows`)
+5. `report_error` (`error_code`, `message`)
+
+Terminal event: `data: [DONE]\n\n`.
+
+### Endpoints Reference
+
+| Method | Path | Auth / Role | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/process` | Member | Process spreadsheet or photo input. |
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/batch_form` | Member | Batch manual form submission (up to 500 rows). |
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}/confirm` | Owner / Admin / Manager | Confirms staging rows into observations. |
+| `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions` | Member | List submissions with pagination and status filter. |
+| `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Member | Get submission details and processing summary. |
+| `PATCH` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Owner / Admin / Manager | Update submission metadata or review note. |
+| `DELETE` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Owner / Admin | Delete submission and cascade delete staging rows. |
+| `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}/staging_rows` | Member | List staging rows with review status filter. |
+| `PATCH` | `/api/v1/businesses/{b_id}/sales_report_staging_rows/{row_id}` | Member | Correct staging row values (e.g. resolve product). |
+| `GET` | `/api/v1/businesses/{b_id}/sales_report_observations` | Member | Query confirmed observations (analytics / BI). |
+
+---
+
+## 23. Dynamic Profiling & LLM Semantic Mapping
+
+To eliminate fragile column name assumptions and rigid spreadsheet templates, Gyros implements dynamic schema mapping powered by the AMD Token Factory LLM.
+
+### Architecture
+
+```
+Spreadsheet Bytes (.xlsx / .csv)
+         │
+         ▼
+input_profiler.py
+   ├── profile_excel() / profile_csv()
+   ├── Extracts raw headers, samples first 5 rows, infers column types
+   ├── Detects merged cells and multi-level headers
+   └── Formats compact structural prompt (~500 tokens)
+         │
+         ▼
+semantic_mapper.py
+   ├── map_columns_with_llm(profile, business_context)
+   ├── Injects business product catalog and canonical schema
+   ├── Calls AMD Token Factory (chat_completion with json_object)
+   ├── Scores per-column confidence (0.0 to 1.0) and reasoning
+   └── Deterministic fallback to static COLUMN_MAPPING on error
+         │
+         ▼
+spreadsheet_parser.py
+   └── normalize_header_from_mapping() maps raw columns to canonical fields
+         │
+         ▼
+Staging Rows (extraction_confidence_json)
+   └── Full audit trail: model used, per-column confidence, warnings
+```
+
+### Canonical Field Schema
+
+The semantic mapper targets a fixed canonical dictionary (`CANONICAL_FIELDS`):
+- Identification: `raw_product_name`, `product_id`, `branch_id`
+- Period: `period_start`, `period_end`, `granularity`
+- Stock: `prepared_qty`, `opening_stock_qty`, `received_qty`, `available_stock_qty`, `leftover_qty`
+- Sales & Loss: `sold_qty`, `spoiled_qty`, `damaged_qty`, `staff_meals_qty`, `donated_qty`, `other_disposition_qty`
+- Revenue: `recorded_revenue`
+- Ignored: `_skip` (non-sales metadata, row numbers, arbitrary notes)
+
+### Deterministic Fallback Strategy
+
+1. **Graceful Fallback:** If `SEMANTIC_MAPPING_ENABLED=False`, `AMD_API_KEY` is not configured, or the LLM request times out/fails, the parser automatically falls back to the static `COLUMN_MAPPING` dictionary.
+2. **Confidence Thresholding:** Columns mapped below `SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD` (default: `0.7`) emit `ERR-RPT-021` warning issues on staging rows for human operator review.
+3. **Auditability:** Every staging row persists the mapping metadata (`mapping_method`, `model`, `column_confidences`, `warnings`) inside `extraction_confidence_json`.

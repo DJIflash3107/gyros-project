@@ -1,5 +1,6 @@
+from datetime import date
 from typing import Optional
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, File, Form, UploadFile
 from sqlalchemy.orm import Session
 from app.configs.database import get_db
 from app.models.user import User
@@ -7,6 +8,7 @@ from app.models.schemas.sales_report_submission import (
     SalesReportSubmissionCreate,
     SalesReportSubmissionUpdate,
 )
+from app.models.schemas.sales_report_processing import ManualFormBatchCreate
 from app.models.schemas.pagination import PaginationParams
 from app.middlewares.auth import get_current_user, require_business_membership
 from app.handlers import sales_report_submission_handler
@@ -15,6 +17,43 @@ router = APIRouter(
     prefix="/api/v1/businesses/{business_id}/sales_report_submissions",
     tags=["Sales Report Submissions"],
 )
+
+
+@router.post("/process", status_code=201, dependencies=[Depends(require_business_membership())])
+async def process_submission(
+    business_id: int,
+    file: UploadFile = File(...),
+    input_method: str = Form(...),
+    report_period_type: str = Form(...),
+    coverage_start: date = Form(...),
+    coverage_end: date = Form(...),
+    branch_id: Optional[int] = Form(None),
+    stream: Optional[bool] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return await sales_report_submission_handler.process_submission_handler(
+        business_id=business_id,
+        file=file,
+        input_method=input_method,
+        report_period_type=report_period_type,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        branch_id=branch_id,
+        current_user=current_user,
+        db=db,
+        stream=stream,
+    )
+
+
+@router.post("/batch_form", status_code=201, dependencies=[Depends(require_business_membership())])
+def batch_form(
+    business_id: int,
+    data: ManualFormBatchCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return sales_report_submission_handler.batch_form_handler(business_id, data, current_user, db)
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_business_membership())])

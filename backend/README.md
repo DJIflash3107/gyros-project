@@ -1,6 +1,6 @@
 # Gyros Project — Backend API
 
-A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, and an agentic **Business Operations Agent** built with **LangGraph**.
+A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, an agentic **Business Operations Agent** built with **LangGraph**, and a robust multi-channel **Sales Report Processing & LLM Semantic Mapping** engine.
 
 ---
 
@@ -9,7 +9,20 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
 - **Multi-Tenant Architecture**: Strict tenancy isolation and role-based access control (`owner`, `admin`, `manager`, `member`, `viewer`).
 - **Standardized Response Envelope**: Uniform JSON response shape across all standard endpoints:
   - `{ "message": { "success": "..." }, "error": {}, "data": { ... } }`
-- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`) and correlated `request_id` context in every log record.
+- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`) and correlated `request_id` context in every log record.
+- **Sales Report Processing & Staging Workflow**:
+  - Multi-channel ingestion supporting **Spreadsheets** (`.xlsx`, `.xls`, `.csv`), **Batch Manual Forms** (up to 500 rows), and **Sales-record Photos / Receipts** (vision OCR).
+  - **Staging-Only Invariant**: Extracted data is always persisted to staging rows (`SalesReportStagingRow`) and is **never** auto-confirmed.
+  - **Explicit Confirmation**: Safe transition from staging rows into immutable confirmed observations (`SalesReportObservation`) via authenticated `POST .../{submission_id}/confirm`.
+  - **Centralized Validation Engine**: 10 automated business integrity checks including product alias resolution, branch validation, date range coverage, non-negative bounds, intra-batch duplicate detection, and cross-submission observation overlap protection.
+  - **SHA-256 Deduplication**: File hashing blocks accidental re-upload of active submissions.
+  - **Real-Time Progress Streaming**: SSE streaming for photo extraction and long-running validation tasks (`report_status`, `extraction_progress`, `validation_result`, `report_complete`, `report_error`).
+- **Dynamic Profiling & LLM Semantic Mapping**:
+  - Layout-agnostic spreadsheet parsing powered by AMD Token Factory LLMs.
+  - Automatic inspection of sheet names, raw headers, sample rows, inferred data types, and merged cells.
+  - Semantic mapping of arbitrary English, Indonesian, or colloquial column titles into a unified canonical schema (`CANONICAL_FIELDS`).
+  - Per-column confidence scoring and reasoning with automatic warning issues (`ERR-RPT-021`) for low-confidence fields.
+  - **Deterministic Fallback**: Automatically falls back to a static mapping dictionary if LLM services are offline or disabled.
 - **Business Operations Agent (LangGraph)**:
   - Real-time conversational AI assistant powered by a LangGraph `StateGraph` workflow.
   - Genuine token-by-token and lifecycle streaming over Server-Sent Events (SSE) via `POST /api/v1/agent/businesses/{business_id}/chat`.
@@ -24,7 +37,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Graceful degradation: server boots normally without API credentials.
   - Zero placeholder output policy: errors are raised explicitly and traceably.
 - **Database Migrations**: Managed schema versions using **Alembic**.
-- **Automated Testing**: 62 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
+- **Automated Testing**: 99 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
 
 ---
 
@@ -38,7 +51,8 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
 | **Database Migrations** | [Alembic](https://alembic.sqlalchemy.org/) |
 | **Authentication** | [PyJWT](https://pyjwt.readthedocs.io/) (HS256) + [bcrypt](https://pypi.org/project/bcrypt/) |
 | **Agent & Workflow Graph** | [LangGraph](https://langchain-ai.github.io/langgraph/) (0.4+) + [LangChain Core](https://python.langchain.com/) + [LangChain OpenAI](https://github.com/langchain-ai/langchain) |
-| **LLM Gateway / Provider** | [AMD Token Factory](https://developer.amd.com.cn/) (OpenAI-compatible) |
+| **LLM Gateway / Provider** | [AMD Token Factory](https://developer.amd.com.cn/) (OpenAI-compatible, chat & vision) |
+| **Spreadsheet Ingestion** | [openpyxl](https://openpyxl.readthedocs.io/) (3.1+ for Excel `.xlsx`) + `csv` stdlib |
 | **HTTP Client / Streaming** | [HTTPX](https://www.python-httpx.org/) (Async client with connection pooling) |
 | **Testing** | [pytest](https://docs.pytest.org/) + `pytest-asyncio` |
 
@@ -60,34 +74,60 @@ backend/
 │   │   ├── security.py       # Password hashing & JWT token helpers
 │   │   └── settings.py       # Pydantic Settings class (reads from .env)
 │   ├── handlers/             # HTTP-layer request unpackers & response formatters
-│   │   ├── agent_handler.py  # Agent SSE streaming chat handler
-│   │   ├── ai_handler.py     # AI discovery & completion handlers
+│   │   ├── agent_handler.py                  # Agent SSE streaming chat handler
+│   │   ├── ai_handler.py                     # AI discovery & completion handlers
+│   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
+│   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates
+│   │   ├── sales_report_observation_handler.py# Confirmed sales observation queries
+│   │   ├── import_issue_handler.py           # Import validation issue queries
+│   │   ├── product_alias_handler.py          # Product alias management
 │   │   └── <entity>_handler.py
 │   ├── helpers/              # Logging, exceptions, error codes, response builders
 │   ├── middlewares/          # RequestContextMiddleware & auth dependency guards
 │   ├── models/               # SQLAlchemy ORM models & Pydantic schemas
+│   │   ├── sales_report_submission.py   # Ingestion submissions
+│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized)
+│   │   ├── sales_report_observation.py  # Confirmed observations
+│   │   ├── import_issue.py              # Staging validation & extraction issues
+│   │   ├── product_alias.py             # Alias mappings
 │   │   └── schemas/          # Input/output schemas (BaseModel)
-│   │       ├── agent.py      # SSE event & chat request schemas
-│   │       ├── ai.py         # AI provider schemas
+│   │       ├── agent.py                  # SSE event & chat request schemas
+│   │       ├── ai.py                     # AI provider schemas
+│   │       ├── sales_report_processing.py # Batch form, process response & SSE schemas
+│   │       ├── sales_report_submission.py # Submissions schemas
+│   │       ├── sales_report_staging_row.py# Staging schemas
+│   │       ├── sales_report_observation.py# Observation schemas
 │   │       └── <entity>.py
 │   ├── routes/               # FastAPI APIRouter endpoints mounted under /api/v1/
-│   │   ├── agent_routes.py   # Agent chat endpoint
-│   │   ├── ai_routes.py      # AI discovery & completion endpoints
+│   │   ├── agent_routes.py               # Agent chat endpoint
+│   │   ├── ai_routes.py                  # AI discovery & completion endpoints
+│   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
+│   │   ├── sales_report_staging_row_routes.py
+│   │   ├── sales_report_observation_routes.py
+│   │   ├── import_issue_routes.py
+│   │   ├── product_alias_routes.py
 │   │   └── <entity>_routes.py
 │   ├── services/             # Business logic and external service interactions
-│   │   ├── agent_service.py  # LangGraph astream_events orchestration
-│   │   ├── ai_service.py     # AMD AI service orchestration
+│   │   ├── agent_service.py                  # LangGraph astream_events orchestration
+│   │   ├── ai_service.py                     # AMD AI service orchestration
+│   │   ├── sales_report_processing_service.py # Ingestion orchestrator (spreadsheet/photo/form)
+│   │   ├── input_profiler.py                 # Spreadsheet structural profiler
+│   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapper
+│   │   ├── spreadsheet_parser.py             # Excel/CSV parser with dynamic mapping
+│   │   ├── photo_extractor.py                # AMD VLM extraction with SSE progress streaming
+│   │   ├── validation_engine.py              # 10-step centralized validation & alias resolution
+│   │   ├── sales_report_submission_service.py # Submissions CRUD & atomic observation confirmation
 │   │   └── <entity>_service.py
 │   └── main.py               # FastAPI application entry point & lifespan management
 ├── alembic/                  # Database migration scripts & environment
 ├── tests/                    # Pytest test suite (in-memory SQLite)
-│   ├── test_agent_auth.py    # Agent auth & cross-tenant isolation tests
-│   ├── test_agent_graph.py   # LangGraph state & graph unit tests
-│   ├── test_agent_streaming.py # SSE streaming, deltas, timeouts, disconnects
-│   ├── test_agent_tools.py   # Read-only tools, zero writes, tenant filter tests
-│   ├── test_ai_endpoints.py  # Tests for /api/v1/ai routes
-│   ├── test_amd_client.py    # Tests for AMDTokenFactoryClient
-│   └── test_*.py             # Feature-grouped test files
+│   ├── test_agent_*.py                   # Agent auth, graph, streaming, and tool suites
+│   ├── test_ai_endpoints.py              # Tests for /api/v1/ai routes
+│   ├── test_amd_client.py                # Tests for AMDTokenFactoryClient
+│   ├── test_sales_report_processing.py   # Multi-channel ingestion, validation, and confirmation
+│   ├── test_semantic_mapping.py          # Profiler, LLM semantic mapper, and fallback tests
+│   ├── test_sales_submissions.py         # Submissions CRUD and review lifecycle
+│   └── test_*.py                         # Feature-grouped test files
 ├── .env.example              # Environment variables template
 ├── alembic.ini               # Alembic configuration
 └── requirements.txt          # Python dependencies
@@ -161,9 +201,20 @@ AGENT_MAX_TURNS=10               # Max tool round-trips per conversation turn
 AGENT_REQUEST_TIMEOUT=120        # Total agent request timeout in seconds
 AGENT_MAX_TOKENS=4096            # Max tokens for agent LLM responses
 AGENT_TEMPERATURE=0.3            # Conservative temperature for business ops
+
+# Vision Configuration (Photo Extraction)
+VISION_MODEL_OVERRIDE=""         # Specific vision model override (empty = auto-discover)
+VISION_MAX_IMAGE_SIZE_MB=5       # Max photo upload size
+VISION_EXTRACTION_TEMPERATURE=0.1 # Low temperature for accurate OCR
+
+# Semantic Mapping Configuration (Dynamic Column Profiling)
+SEMANTIC_MAPPING_ENABLED=true    # Toggle LLM dynamic mapping
+SEMANTIC_MAPPING_MODEL=""        # Model for column mapping (empty = AMD_DEFAULT_MODEL)
+SEMANTIC_MAPPING_TEMPERATURE=0.0 # Deterministic schema mapping
+SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD=0.7 # Minimum confidence score threshold
 ```
 
-> **Note:** If `AMD_API_KEY` is not provided, the application will boot and run normal CRUD operations without issue. Calls to AI endpoints will return a standardized `503 Service Unavailable` (`ERR-AI-501`).
+> **Note:** If `AMD_API_KEY` is not provided, the application will boot and run normal CRUD, spreadsheet parsing (via static fallback), and manual form processing without issue. Calls to AI-specific endpoints will return a standardized `503 Service Unavailable` (`ERR-AI-501`).
 
 ### 4. Database Migrations
 
@@ -214,16 +265,21 @@ All API routes are prefixed with `/api/v1`.
 - `POST /api/v1/businesses/{id}/memberships` — Manage business members and roles
 - `GET /api/v1/businesses/{id}/branches` — Manage physical/logical branches
 - `GET /api/v1/businesses/{id}/products` — Product catalog and SKU management
-- `GET /api/v1/businesses/{id}/product-aliases` — Multi-channel alias mappings
-- `GET /api/v1/businesses/{id}/product-cost-history` — Cost history tracking
-- `GET /api/v1/businesses/{id}/product-price-history` — Price history tracking
-
-### Operations & Reporting
-- `POST /api/v1/businesses/{id}/sales-reports/submissions` — Upload and submit sales report batches
-- `GET /api/v1/businesses/{id}/sales-reports/staging-rows` — Staging row processing & reconciliation
-- `GET /api/v1/businesses/{id}/sales-reports/observations` — Extracted report observations
+- `GET /api/v1/businesses/{id}/product_aliases` — Multi-channel alias mappings
+- `GET /api/v1/businesses/{id}/product_cost_history` — Cost history tracking
+- `GET /api/v1/businesses/{id}/product_price_history` — Price history tracking
 - `GET /api/v1/businesses/{id}/expenses` — Expense ledger tracking
-- `GET /api/v1/businesses/{id}/import-issues` — Reconciliation error & anomaly issues
+
+### Sales Report Ingestion, Staging & Confirmation
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Ingest spreadsheet (`.xlsx`, `.xls`, `.csv`) or photo inputs with LLM dynamic semantic mapping and validation.
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` — Batch manual form submission (up to 500 rows).
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}/confirm` — Atomically confirm reviewed staging rows into immutable `SalesReportObservation` records.
+- `GET /api/v1/businesses/{business_id}/sales_report_submissions` — List submissions with pagination and status filters (`pending`, `processing`, `reviewed`, `confirmed`, `rejected`).
+- `GET /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}` — Get submission details and summary counters.
+- `GET /api/v1/sales_report_submissions/{submission_id}/staging_rows` — Query staging rows by review status (`ready`, `pending_review`, `needs_correction`).
+- `PATCH /api/v1/sales_report_submissions/{submission_id}/staging_rows/{row_id}` — Correct staging row values (e.g. resolve unmapped product).
+- `GET /api/v1/businesses/{business_id}/sales_report_observations` — Query confirmed sales observations for analytics and reporting.
+- `GET /api/v1/sales_report_submissions/{submission_id}/import_issues` — Query extraction and validation issues.
 
 ### Business Operations Agent (LangGraph)
 - `POST /api/v1/agent/businesses/{business_id}/chat` — Conversational business operations assistant streaming real-time Server-Sent Events (SSE). Requires JWT authentication and business membership.
@@ -238,11 +294,14 @@ All API routes are prefixed with `/api/v1`.
 
 ## Testing
 
-The backend includes a comprehensive test suite (62 test cases) utilizing an isolated in-memory SQLite database:
+The backend includes a comprehensive test suite (**99 test cases**) utilizing an isolated in-memory SQLite database:
 
 ```bash
 # Run all tests
 pytest -v
+
+# Run Sales Report Processing & Semantic Mapping tests
+pytest tests/test_sales_report_processing.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
 
 # Run Business Operations Agent tests
 pytest tests/test_agent_auth.py tests/test_agent_tools.py tests/test_agent_graph.py tests/test_agent_streaming.py -v
@@ -259,4 +318,4 @@ pytest tests/test_auth.py tests/test_authorization.py -v
 ## Developer Guidelines
 
 For detailed architecture guidelines, coding patterns, response envelope standards, and adding new entities, refer to:
-- [`AGENTS.md`](./AGENTS.md) — The comprehensive guide for human and AI developers working on this codebase.
+- [`AGENTS.md`](./AGENTS.md) — The authoritative guide for human and AI developers working on this codebase.

@@ -14,6 +14,17 @@ from app.models.schemas.expense import ExpenseCreate, ExpenseUpdate, ExpenseResp
 from app.models.schemas.product_cost_history import ProductCostHistoryCreate, ProductCostHistoryUpdate, ProductCostHistoryResponse
 from app.models.schemas.product_price_history import ProductPriceHistoryCreate, ProductPriceHistoryUpdate, ProductPriceHistoryResponse
 from app.models.schemas.ai import AIModelInfo, AIHealthResponse, ChatMessage, ChatCompletionRequest
+from app.models.schemas.sales_report_processing import (
+    ManualFormRowInput,
+    ManualFormBatchCreate,
+    ProcessingSummary,
+    ProcessingResultResponse,
+    ReportStatusEvent,
+    ExtractionProgressEvent,
+    ValidationResultEvent,
+    ReportErrorEvent,
+    ReportCompleteEvent,
+)
 from app.models.schemas.agent import (
     AgentEventType,
     AgentStatusEvent,
@@ -87,4 +98,13 @@ __all__ = [
     "AgentCompleteEvent",
     "AgentSSEEvent",
     "AgentChatRequest",
+    "ManualFormRowInput",
+    "ManualFormBatchCreate",
+    "ProcessingSummary",
+    "ProcessingResultResponse",
+    "ReportStatusEvent",
+    "ExtractionProgressEvent",
+    "ValidationResultEvent",
+    "ReportErrorEvent",
+    "ReportCompleteEvent",
 ]
