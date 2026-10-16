@@ -240,11 +240,79 @@ def parse_csv(
         )
 
 
+def _parse_single_sheet(
+    sheet: Any,
+    sheet_name: str,
+    mapping_result: Optional[SemanticMappingResult] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Parse a single worksheet into row dictionaries, with source_sheet_name attached."""
+    rows_iter = sheet.iter_rows(values_only=True)
+    header_row = None
+    header_row_idx = 1
+    for idx, r in enumerate(rows_iter, start=1):
+        if any(cell is not None and str(cell).strip() != "" for cell in r):
+            header_row = r
+            header_row_idx = idx
+            break
+
+    if not header_row:
+        return [], []
+
+    header_strings = [str(c).strip() if c is not None else f"col_{idx+1}" for idx, c in enumerate(header_row)]
+    col_keys = [normalize_header_from_mapping(h, mapping_result) for h in header_strings]
+
+    parsed_rows: List[Dict[str, Any]] = []
+    parse_errors: List[Dict[str, Any]] = []
+
+    for row_idx, r in enumerate(rows_iter, start=header_row_idx + 1):
+        if not any(cell is not None and str(cell).strip() != "" for cell in r):
+            continue
+
+        clean_cells = [str(c).strip() if c is not None else "" for c in r[:len(header_strings)]]
+        if clean_cells == header_strings:
+            # Skip repeated header row
+            continue
+
+        raw_payload: Dict[str, Any] = {}
+        row_dict: Dict[str, Any] = {
+            "source_row_number": row_idx,
+            "source_sheet_name": sheet_name,
+        }
+
+        for col_idx, cell in enumerate(r):
+            orig_col = header_strings[col_idx] if col_idx < len(header_strings) else f"col_{col_idx+1}"
+            norm_col = col_keys[col_idx] if col_idx < len(col_keys) else f"col_{col_idx+1}"
+
+            raw_payload[orig_col] = str(cell) if cell is not None else None
+
+            if cell is not None and str(cell).strip() != "":
+                row_dict[norm_col] = cell
+
+        row_dict["raw_payload_json"] = raw_payload
+        if mapping_result:
+            row_dict["extraction_confidence_json"] = {
+                "mapping_method": "llm" if not mapping_result.fallback_used else "static_fallback",
+                "model": mapping_result.model_used,
+                "column_confidences": {
+                    entry.source_column: {
+                        "target": entry.target_field,
+                        "confidence": entry.confidence,
+                        "reasoning": entry.reasoning,
+                    }
+                    for entry in mapping_result.mappings
+                },
+                "warnings": mapping_result.warnings,
+            }
+        parsed_rows.append(row_dict)
+
+    return parsed_rows, parse_errors
+
+
 def parse_excel(
     file_bytes: bytes,
     mapping_result: Optional[SemanticMappingResult] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Parse XLSX bytes into normalized row dictionaries."""
+    """Parse XLSX bytes into normalized row dictionaries from the active worksheet."""
     try:
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception as e:
@@ -264,71 +332,67 @@ def parse_excel(
                 error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
             )
 
-        rows_iter = sheet.iter_rows(values_only=True)
-        header_row = None
-        for r in rows_iter:
-            if any(cell is not None and str(cell).strip() != "" for cell in r):
-                header_row = r
-                break
+        parsed_rows, parse_errors = _parse_single_sheet(sheet, sheet.title, mapping_result)
 
-        if not header_row:
+        if not parsed_rows:
             raise ValidationException(
-                errors={"file": "Workbook contains no data or headers", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
-                message="Spreadsheet contains no data rows",
-                error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
-            )
-
-        header_strings = [str(c).strip() if c is not None else f"col_{idx+1}" for idx, c in enumerate(header_row)]
-        col_keys = [normalize_header_from_mapping(h, mapping_result) for h in header_strings]
-
-        parsed_rows: List[Dict[str, Any]] = []
-        parse_errors: List[Dict[str, Any]] = []
-        data_row_count = 0
-
-        for row_idx, r in enumerate(rows_iter, start=2):
-            if not any(cell is not None and str(cell).strip() != "" for cell in r):
-                continue
-
-            data_row_count += 1
-            raw_payload: Dict[str, Any] = {}
-            row_dict: Dict[str, Any] = {"source_row_number": row_idx}
-
-            for col_idx, cell in enumerate(r):
-                orig_col = header_strings[col_idx] if col_idx < len(header_strings) else f"col_{col_idx+1}"
-                norm_col = col_keys[col_idx] if col_idx < len(col_keys) else f"col_{col_idx+1}"
-
-                # Preserve raw string/number for payload
-                raw_payload[orig_col] = str(cell) if cell is not None else None
-
-                if cell is not None and str(cell).strip() != "":
-                    row_dict[norm_col] = cell
-
-            row_dict["raw_payload_json"] = raw_payload
-            if mapping_result:
-                row_dict["extraction_confidence_json"] = {
-                    "mapping_method": "llm" if not mapping_result.fallback_used else "static_fallback",
-                    "model": mapping_result.model_used,
-                    "column_confidences": {
-                        entry.source_column: {
-                            "target": entry.target_field,
-                            "confidence": entry.confidence,
-                            "reasoning": entry.reasoning,
-                        }
-                        for entry in mapping_result.mappings
-                    },
-                    "warnings": mapping_result.warnings,
-                }
-            parsed_rows.append(row_dict)
-
-        if data_row_count == 0:
-            raise ValidationException(
-                errors={"file": "Spreadsheet contains headers but no data rows", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                errors={"file": "Spreadsheet contains no data rows", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
                 message="Spreadsheet contains no data rows",
                 error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
             )
 
         return parsed_rows, parse_errors
 
+    finally:
+        wb.close()
+
+
+def parse_excel_workbook(
+    file_bytes: bytes,
+    sheet_mappings: Dict[str, Optional[SemanticMappingResult]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Parse multiple worksheets in an Excel workbook according to sheet_mappings.
+    Only sheets present in sheet_mappings will be parsed.
+    Raises ValidationException if workbook is corrupt or no data rows extracted.
+    """
+    if not file_bytes:
+        raise ValidationException(
+            errors={"file": "File is empty", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+            message="Spreadsheet contains no data rows",
+            error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+        )
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception as e:
+        logger.error(f"Error loading Excel workbook: {e}", exc_info=True)
+        raise ValidationException(
+            errors={"file": f"Invalid or corrupt Excel workbook: {str(e)}", "error_code": ErrorCodeRegistry.RPT_MALFORMED_FILE},
+            message="Malformed or corrupt spreadsheet file",
+            error_code=ErrorCodeRegistry.RPT_MALFORMED_FILE,
+        )
+
+    try:
+        all_parsed_rows: List[Dict[str, Any]] = []
+        all_parse_errors: List[Dict[str, Any]] = []
+
+        for sheet_name, mapping_result in sheet_mappings.items():
+            if sheet_name not in wb.sheetnames:
+                continue
+            sheet = wb[sheet_name]
+            p_rows, p_errs = _parse_single_sheet(sheet, sheet_name, mapping_result)
+            all_parsed_rows.extend(p_rows)
+            all_parse_errors.extend(p_errs)
+
+        if not all_parsed_rows:
+            raise ValidationException(
+                errors={"file": "Spreadsheet contains no data rows across relevant worksheets", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                message="Spreadsheet contains no data rows",
+                error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+            )
+
+        return all_parsed_rows, all_parse_errors
     finally:
         wb.close()
 

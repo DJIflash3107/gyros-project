@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.models.schemas.sales_report_staging_row import (
     SalesReportStagingRowCreate,
     SalesReportStagingRowUpdate,
+    SalesReportStagingRowBulkUpdate,
     SalesReportStagingRowResponse,
 )
 from app.models.schemas.pagination import PaginationParams
@@ -67,3 +68,20 @@ def delete_staging_row_handler(submission_id: int, row_id: int, db: Session) -> 
         message="Staging row deleted successfully",
         data={},
     )
+
+
+def bulk_update_staging_rows_handler(
+    submission_id: int,
+    data: SalesReportStagingRowBulkUpdate,
+    db: Session,
+) -> JSONResponse:
+    rows = sales_report_staging_row_service.bulk_update_staging_rows(db, submission_id, data)
+    response_items = [SalesReportStagingRowResponse.model_validate(r).model_dump() for r in rows]
+    return success_response(
+        message=f"{len(rows)} staging row(s) updated successfully",
+        data={
+            "updated_count": len(rows),
+            "staging_rows": response_items,
+        },
+    )
+

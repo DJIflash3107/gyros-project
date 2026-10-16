@@ -5,6 +5,7 @@ from app.configs.database import get_db
 from app.models.schemas.sales_report_staging_row import (
     SalesReportStagingRowCreate,
     SalesReportStagingRowUpdate,
+    SalesReportStagingRowBulkUpdate,
 )
 from app.models.schemas.pagination import PaginationParams
 from app.middlewares.auth import get_current_user
@@ -36,6 +37,16 @@ def list_staging_rows(
 ):
     params = PaginationParams(page=page, page_size=page_size)
     return sales_report_staging_row_handler.list_staging_rows_handler(submission_id, review_status, params, db)
+
+
+@router.patch("/bulk")
+@router.post("/bulk")
+def bulk_update_staging_rows(
+    submission_id: int,
+    data: SalesReportStagingRowBulkUpdate,
+    db: Session = Depends(get_db),
+):
+    return sales_report_staging_row_handler.bulk_update_staging_rows_handler(submission_id, data, db)
 
 
 @router.get("/{row_id}")

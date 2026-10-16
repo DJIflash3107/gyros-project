@@ -1,6 +1,6 @@
 # Gyros Project — Backend API
 
-A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, an agentic **Business Operations Agent** built with **LangGraph**, and a robust multi-channel **Sales Report Processing & LLM Semantic Mapping** engine.
+A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, an agentic **Business Operations Agent** built with **LangGraph**, a multi-sheet **Sales Report Processing & LLM Semantic Mapping** engine, and a predictive **Demand Forecasting Service**.
 
 ---
 
@@ -9,10 +9,12 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
 - **Multi-Tenant Architecture**: Strict tenancy isolation and role-based access control (`owner`, `admin`, `manager`, `member`, `viewer`).
 - **Standardized Response Envelope**: Uniform JSON response shape across all standard endpoints:
   - `{ "message": { "success": "..." }, "error": {}, "data": { ... } }`
-- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`) and correlated `request_id` context in every log record.
+- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`, `ERR-FOR-001`) and correlated `request_id` context in every log record.
 - **Sales Report Processing & Staging Workflow**:
   - Multi-channel ingestion supporting **Spreadsheets** (`.xlsx`, `.xls`, `.csv`), **Batch Manual Forms** (up to 500 rows), and **Sales-record Photos / Receipts** (vision OCR).
-  - **Staging-Only Invariant**: Extracted data is always persisted to staging rows (`SalesReportStagingRow`) and is **never** auto-confirmed.
+  - **Multi-Sheet Workbook Processing**: Inspects every worksheet independently in an uploaded `.xlsx`, using LLM sheet role classification (`sales`, `reference`, `instructional`, `ambiguous`), per-sheet column mapping, and cross-sheet duplicate detection.
+  - **Staging-Only Invariant**: Extracted data is always persisted to staging rows (`SalesReportStagingRow`) and is **never** auto-confirmed. Master data (products/branches) are never auto-created from raw uploads; unmapped rows are flagged as `needs_correction`.
+  - **Bulk Staging Row Review & Update**: Dedicated `PATCH`/`POST` `/staging_rows/bulk` endpoint to mark multiple or all rows as `ready`, set review notes, or update branch/product links in one call.
   - **Explicit Confirmation**: Safe transition from staging rows into immutable confirmed observations (`SalesReportObservation`) via authenticated `POST .../{submission_id}/confirm`.
   - **Centralized Validation Engine**: 10 automated business integrity checks including product alias resolution, branch validation, date range coverage, non-negative bounds, intra-batch duplicate detection, and cross-submission observation overlap protection.
   - **SHA-256 Deduplication**: File hashing blocks accidental re-upload of active submissions.
@@ -23,6 +25,11 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Semantic mapping of arbitrary English, Indonesian, or colloquial column titles into a unified canonical schema (`CANONICAL_FIELDS`).
   - Per-column confidence scoring and reasoning with automatic warning issues (`ERR-RPT-021`) for low-confidence fields.
   - **Deterministic Fallback**: Automatically falls back to a static mapping dictionary if LLM services are offline or disabled.
+- **Demand Forecasting Service**:
+  - Time-series statistical and predictive modeling algorithms: Simple Moving Average (SMA), Exponential Moving Average (EMA), and Holt-Winters Exponential Smoothing (with additive/multiplicative trend and seasonality).
+  - **Historical Data Sufficiency**: Inspects observation history (`/sufficiency`) against required thresholds before generating forecasts.
+  - **Predictive Backtesting Evaluation**: Evaluates model performance (`/evaluate`) against historical actuals with Mean Absolute Error (MAE), Weighted Absolute Percentage Error (WAPE), and Bias percentage.
+  - **Persistent Runs**: Tracks forecast run metadata, model parameters, and per-period predicted points with confidence intervals (`/runs`).
 - **Business Operations Agent (LangGraph)**:
   - Real-time conversational AI assistant powered by a LangGraph `StateGraph` workflow.
   - Genuine token-by-token and lifecycle streaming over Server-Sent Events (SSE) via `POST /api/v1/agent/businesses/{business_id}/chat`.
@@ -37,7 +44,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Graceful degradation: server boots normally without API credentials.
   - Zero placeholder output policy: errors are raised explicitly and traceably.
 - **Database Migrations**: Managed schema versions using **Alembic**.
-- **Automated Testing**: 99 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
+- **Automated Testing**: 141 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
 
 ---
 
@@ -77,8 +84,9 @@ backend/
 │   │   ├── agent_handler.py                  # Agent SSE streaming chat handler
 │   │   ├── ai_handler.py                     # AI discovery & completion handlers
 │   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
-│   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates
+│   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates (including bulk)
 │   │   ├── sales_report_observation_handler.py# Confirmed sales observation queries
+│   │   ├── forecasting_handler.py            # Forecasting predict, evaluate, and sufficiency handlers
 │   │   ├── import_issue_handler.py           # Import validation issue queries
 │   │   ├── product_alias_handler.py          # Product alias management
 │   │   └── <entity>_handler.py
@@ -86,8 +94,10 @@ backend/
 │   ├── middlewares/          # RequestContextMiddleware & auth dependency guards
 │   ├── models/               # SQLAlchemy ORM models & Pydantic schemas
 │   │   ├── sales_report_submission.py   # Ingestion submissions
-│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized)
+│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, source_sheet_name)
 │   │   ├── sales_report_observation.py  # Confirmed observations
+│   │   ├── forecast_run.py              # Forecast runs metadata & error metrics
+│   │   ├── forecast_result.py           # Forecast period points & confidence intervals
 │   │   ├── import_issue.py              # Staging validation & extraction issues
 │   │   ├── product_alias.py             # Alias mappings
 │   │   └── schemas/          # Input/output schemas (BaseModel)
@@ -95,15 +105,17 @@ backend/
 │   │       ├── ai.py                     # AI provider schemas
 │   │       ├── sales_report_processing.py # Batch form, process response & SSE schemas
 │   │       ├── sales_report_submission.py # Submissions schemas
-│   │       ├── sales_report_staging_row.py# Staging schemas
+│   │       ├── sales_report_staging_row.py# Staging schemas (Create/Update/BulkUpdate/Response)
 │   │       ├── sales_report_observation.py# Observation schemas
+│   │       ├── forecasting.py            # ForecastRequest, ForecastEvaluateRequest, ForecastRunResponse
 │   │       └── <entity>.py
 │   ├── routes/               # FastAPI APIRouter endpoints mounted under /api/v1/
 │   │   ├── agent_routes.py               # Agent chat endpoint
 │   │   ├── ai_routes.py                  # AI discovery & completion endpoints
 │   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
-│   │   ├── sales_report_staging_row_routes.py
+│   │   ├── sales_report_staging_row_routes.py# Staging rows CRUD and /bulk update
 │   │   ├── sales_report_observation_routes.py
+│   │   ├── forecasting_routes.py         # Demand forecasting routes (/predict, /evaluate, /sufficiency, /runs)
 │   │   ├── import_issue_routes.py
 │   │   ├── product_alias_routes.py
 │   │   └── <entity>_routes.py
@@ -111,12 +123,15 @@ backend/
 │   │   ├── agent_service.py                  # LangGraph astream_events orchestration
 │   │   ├── ai_service.py                     # AMD AI service orchestration
 │   │   ├── sales_report_processing_service.py # Ingestion orchestrator (spreadsheet/photo/form)
-│   │   ├── input_profiler.py                 # Spreadsheet structural profiler
-│   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapper
+│   │   ├── input_profiler.py                 # Spreadsheet structural profiler (multi-sheet support)
+│   │   ├── semantic_mapper.py                # LLM-based column mapper & sheet role classifier
 │   │   ├── spreadsheet_parser.py             # Excel/CSV parser with dynamic mapping
 │   │   ├── photo_extractor.py                # AMD VLM extraction with SSE progress streaming
 │   │   ├── validation_engine.py              # 10-step centralized validation & alias resolution
 │   │   ├── sales_report_submission_service.py # Submissions CRUD & atomic observation confirmation
+│   │   ├── sales_report_staging_row_service.py# Staging row persistence & bulk updates
+│   │   ├── forecasting_engine.py             # Statistical forecasting engine (SMA, EMA, Holt-Winters, Backtesting)
+│   │   ├── forecasting_service.py            # Forecasting orchestration, validation & DB persistence
 │   │   └── <entity>_service.py
 │   └── main.py               # FastAPI application entry point & lifespan management
 ├── alembic/                  # Database migration scripts & environment
@@ -125,7 +140,11 @@ backend/
 │   ├── test_ai_endpoints.py              # Tests for /api/v1/ai routes
 │   ├── test_amd_client.py                # Tests for AMDTokenFactoryClient
 │   ├── test_sales_report_processing.py   # Multi-channel ingestion, validation, and confirmation
+│   ├── test_multi_sheet_processing.py    # Multi-sheet Excel workbook ingestion tests
+│   ├── test_sales_report_staging_row_bulk.py # Staging row bulk update tests
 │   ├── test_semantic_mapping.py          # Profiler, LLM semantic mapper, and fallback tests
+│   ├── test_forecasting_engine.py        # Statistical forecasting engine tests
+│   ├── test_forecasting_endpoints.py     # Forecasting endpoints tests (predict, evaluate, sufficiency)
 │   ├── test_sales_submissions.py         # Submissions CRUD and review lifecycle
 │   └── test_*.py                         # Feature-grouped test files
 ├── .env.example              # Environment variables template
@@ -271,15 +290,24 @@ All API routes are prefixed with `/api/v1`.
 - `GET /api/v1/businesses/{id}/expenses` — Expense ledger tracking
 
 ### Sales Report Ingestion, Staging & Confirmation
-- `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Ingest spreadsheet (`.xlsx`, `.xls`, `.csv`) or photo inputs with LLM dynamic semantic mapping and validation.
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Ingest spreadsheet (`.xlsx`, `.xls`, `.csv`) or photo inputs with LLM dynamic semantic mapping and validation (supports multi-sheet workbooks).
 - `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` — Batch manual form submission (up to 500 rows).
 - `POST /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}/confirm` — Atomically confirm reviewed staging rows into immutable `SalesReportObservation` records.
 - `GET /api/v1/businesses/{business_id}/sales_report_submissions` — List submissions with pagination and status filters (`pending`, `processing`, `reviewed`, `confirmed`, `rejected`).
 - `GET /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}` — Get submission details and summary counters.
 - `GET /api/v1/sales_report_submissions/{submission_id}/staging_rows` — Query staging rows by review status (`ready`, `pending_review`, `needs_correction`).
-- `PATCH /api/v1/sales_report_submissions/{submission_id}/staging_rows/{row_id}` — Correct staging row values (e.g. resolve unmapped product).
+- `PATCH /api/v1/sales_report_submissions/{submission_id}/staging_rows/bulk` — Bulk update staging rows (all or by ID list, e.g. mark `ready` or update notes).
+- `POST /api/v1/sales_report_submissions/{submission_id}/staging_rows/bulk` — Alternative method for bulk update.
+- `PATCH /api/v1/sales_report_submissions/{submission_id}/staging_rows/{row_id}` — Correct individual staging row values (e.g. resolve unmapped product).
 - `GET /api/v1/businesses/{business_id}/sales_report_observations` — Query confirmed sales observations for analytics and reporting.
 - `GET /api/v1/sales_report_submissions/{submission_id}/import_issues` — Query extraction and validation issues.
+
+### Demand Forecasting
+- `POST /api/v1/businesses/{business_id}/forecasting/predict` — Generate and persist product demand forecasts (SMA, EMA, Holt-Winters).
+- `POST /api/v1/businesses/{business_id}/forecasting/evaluate` — Run time-ordered backtesting and calculate error metrics (MAE, WAPE, Bias).
+- `GET /api/v1/businesses/{business_id}/forecasting/sufficiency` — Check if sufficient historical observation data exists for forecasting.
+- `GET /api/v1/businesses/{business_id}/forecasting/runs` — List historical forecast runs with pagination and status filters.
+- `GET /api/v1/businesses/{business_id}/forecasting/runs/{run_id}` — Get a specific forecast run with predicted period points and prediction intervals.
 
 ### Business Operations Agent (LangGraph)
 - `POST /api/v1/agent/businesses/{business_id}/chat` — Conversational business operations assistant streaming real-time Server-Sent Events (SSE). Requires JWT authentication and business membership.
@@ -294,14 +322,17 @@ All API routes are prefixed with `/api/v1`.
 
 ## Testing
 
-The backend includes a comprehensive test suite (**99 test cases**) utilizing an isolated in-memory SQLite database:
+The backend includes a comprehensive test suite (**141 test cases**) utilizing an isolated in-memory SQLite database:
 
 ```bash
 # Run all tests
 pytest -v
 
-# Run Sales Report Processing & Semantic Mapping tests
-pytest tests/test_sales_report_processing.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
+# Run Sales Report Processing, Multi-Sheet, Bulk Staging, and Semantic Mapping tests
+pytest tests/test_sales_report_processing.py tests/test_multi_sheet_processing.py tests/test_sales_report_staging_row_bulk.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
+
+# Run Demand Forecasting tests (Engine & Endpoints)
+pytest tests/test_forecasting_engine.py tests/test_forecasting_endpoints.py -v
 
 # Run Business Operations Agent tests
 pytest tests/test_agent_auth.py tests/test_agent_tools.py tests/test_agent_graph.py tests/test_agent_streaming.py -v
@@ -319,3 +350,4 @@ pytest tests/test_auth.py tests/test_authorization.py -v
 
 For detailed architecture guidelines, coding patterns, response envelope standards, and adding new entities, refer to:
 - [`AGENTS.md`](./AGENTS.md) — The authoritative guide for human and AI developers working on this codebase.
+

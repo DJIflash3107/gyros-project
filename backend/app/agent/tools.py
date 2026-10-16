@@ -193,18 +193,71 @@ def execute_product_catalog(
         }
 
 
-def execute_invoke_forecasting(business_id: int, metric: Optional[str] = None) -> Dict[str, Any]:
-    """Stub tool for forecasting service."""
-    return {
-        "summary": "Forecasting service is not yet available in this environment.",
-        "data": {
-            "status": "not_available",
-            "service": "forecasting",
-            "message": "Forecasting service is not yet available in this environment.",
-            "business_id": business_id,
-            "metric": metric,
-        },
-    }
+def execute_invoke_forecasting(
+    business_id: int,
+    db: Optional[Session] = None,
+    branch_id: Optional[int] = None,
+    product_id: Optional[int] = None,
+    horizon_days: int = 7,
+    window_size: int = 7,
+    metric: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute demand forecasting via the forecasting service. Never invents predictions."""
+    if db is None or branch_id is None or product_id is None:
+        return {
+            "summary": "Forecasting service is not yet available for general metric queries without specific branch_id and product_id.",
+            "data": {
+                "status": "not_available",
+                "service": "forecasting",
+                "message": "Forecasting requires a specific branch_id and product_id.",
+                "business_id": business_id,
+                "metric": metric,
+            },
+        }
+
+    from app.services import forecasting_service
+    from app.models.schemas.forecasting import ForecastRequest
+
+    try:
+        req = ForecastRequest(
+            branch_id=branch_id,
+            product_id=product_id,
+            horizon_days=horizon_days,
+            window_size=window_size,
+        )
+        run = forecasting_service.generate_forecast(db, business_id=business_id, data=req)
+        predictions_data = [
+            {
+                "forecast_date": str(p.forecast_date),
+                "predicted_qty": str(p.predicted_qty),
+                "weekday": p.weekday,
+            }
+            for p in run.predictions
+        ]
+        return {
+            "summary": f"Forecast generated for product {product_id} at branch {branch_id}: {len(predictions_data)} day horizon ({run.method})",
+            "data": {
+                "status": "success",
+                "run_id": run.id,
+                "method": run.method,
+                "is_reliable": run.is_reliable,
+                "reliability_note": run.reliability_note,
+                "horizon_days": run.horizon_days,
+                "window_size": run.window_size,
+                "training_start": str(run.training_start) if run.training_start else None,
+                "training_end": str(run.training_end) if run.training_end else None,
+                "observations_used": run.observations_used,
+                "predictions": predictions_data,
+            },
+        }
+    except Exception as e:
+        logger.warning(f"Error executing forecasting for business {business_id}: {type(e).__name__}: {str(e)}")
+        return {
+            "summary": f"Forecasting failed: {str(e)}",
+            "data": None,
+            "error": str(e),
+        }
+
 
 
 def execute_invoke_action_center(business_id: int, action: Optional[str] = None) -> Dict[str, Any]:
@@ -292,6 +345,11 @@ def execute_tool_by_name(
         elif tool_name == "invoke_forecasting":
             return execute_invoke_forecasting(
                 business_id,
+                db=db,
+                branch_id=safe_args.get("branch_id"),
+                product_id=safe_args.get("product_id"),
+                horizon_days=safe_args.get("horizon_days", 7),
+                window_size=safe_args.get("window_size", 7),
                 metric=safe_args.get("metric"),
             )
         elif tool_name == "invoke_action_center":
@@ -371,11 +429,24 @@ def get_agent_tools(db: Session, business_id: int) -> List[BaseTool]:
 
     @tool
     def invoke_forecasting(
+        branch_id: Optional[int] = None,
+        product_id: Optional[int] = None,
+        horizon_days: int = 7,
+        window_size: int = 7,
         metric: Optional[str] = None,
         business_id: Optional[int] = None,
     ) -> dict:
-        """Generate forecasts for sales or business metrics (stub service)."""
-        return execute_invoke_forecasting(bound_business_id, metric=metric)
+        """Generate demand forecasts for a product at a branch using historical sales observations."""
+        return execute_invoke_forecasting(
+            bound_business_id,
+            db=bound_db,
+            branch_id=branch_id,
+            product_id=product_id,
+            horizon_days=horizon_days,
+            window_size=window_size,
+            metric=metric,
+        )
+
 
     @tool
     def invoke_action_center(

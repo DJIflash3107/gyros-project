@@ -12,6 +12,8 @@ from app.models.import_issue import ImportIssue
 from app.models.expense import Expense
 from app.models.product_cost_history import ProductCostHistory
 from app.models.product_price_history import ProductPriceHistory
+from app.models.forecast_run import ForecastRun
+from app.models.forecast_result import ForecastResult
 
 __all__ = [
     "BigIntId",
@@ -30,4 +32,7 @@ __all__ = [
     "Expense",
     "ProductCostHistory",
     "ProductPriceHistory",
+    "ForecastRun",
+    "ForecastResult",
 ]
+

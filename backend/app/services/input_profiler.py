@@ -25,6 +25,13 @@ class SpreadsheetProfile:
     has_multi_header: bool           # True if headers span >1 row
 
 
+@dataclass
+class WorkbookProfile:
+    """Collection of per-sheet profiles for a multi-sheet workbook."""
+    sheet_profiles: List[SpreadsheetProfile]
+    skipped_sheets: List[str]
+
+
 def infer_column_type(values: List[Any]) -> str:
     """Infer data type for a list of values."""
     types_found = set()
@@ -103,38 +110,15 @@ def profile_to_prompt_text(profile: SpreadsheetProfile) -> str:
     return "\n".join(lines)
 
 
-def profile_excel(file_bytes: bytes) -> SpreadsheetProfile:
-    """Profile an Excel file's structure, headers, sample rows, and data types."""
-    if not file_bytes:
-        raise ValidationException(
-            errors={"file": "Empty spreadsheet file", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
-            message="Spreadsheet contains no data rows",
-            error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
-        )
-
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    except Exception as e:
-        logger.error(f"Error loading Excel workbook for profiling: {e}", exc_info=True)
-        raise ValidationException(
-            errors={"file": f"Invalid or corrupt Excel workbook: {str(e)}", "error_code": ErrorCodeRegistry.RPT_MALFORMED_FILE},
-            message="Malformed or corrupt spreadsheet file",
-            error_code=ErrorCodeRegistry.RPT_MALFORMED_FILE,
-        )
-
-    sheet_names = wb.sheetnames
-    if not sheet_names:
-        raise ValidationException(
-            errors={"file": "Workbook contains no worksheets", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
-            message="Spreadsheet contains no data rows",
-            error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
-        )
-
-    sheet = wb.active
-    if sheet is None:
-        sheet = wb[sheet_names[0]]
-
-    active_sheet_name = sheet.title
+def _profile_worksheet(
+    sheet: Any,
+    sheet_names: List[str],
+) -> Optional[SpreadsheetProfile]:
+    """
+    Profile a single openpyxl worksheet.
+    Returns SpreadsheetProfile, or None if the sheet has no header or no data rows.
+    """
+    sheet_name = sheet.title
     merged_ranges = [str(r) for r in sheet.merged_cells.ranges]
 
     has_multi_header = False
@@ -151,11 +135,7 @@ def profile_excel(file_bytes: bytes) -> SpreadsheetProfile:
             break
 
     if not header_row:
-        raise ValidationException(
-            errors={"file": "Workbook contains no data or headers", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
-            message="Spreadsheet contains no data rows",
-            error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
-        )
+        return None
 
     headers = [str(c).strip() if c is not None else f"col_{i+1}" for i, c in enumerate(header_row)]
     sample_rows = []
@@ -177,11 +157,7 @@ def profile_excel(file_bytes: bytes) -> SpreadsheetProfile:
             col_values[i].append(val)
 
     if total_data_rows == 0:
-        raise ValidationException(
-            errors={"file": "Spreadsheet contains headers but no data rows", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
-            message="Spreadsheet contains no data rows",
-            error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
-        )
+        return None
 
     column_types = {}
     for i, h in enumerate(headers):
@@ -189,7 +165,7 @@ def profile_excel(file_bytes: bytes) -> SpreadsheetProfile:
 
     return SpreadsheetProfile(
         sheet_names=sheet_names,
-        active_sheet_name=active_sheet_name,
+        active_sheet_name=sheet_name,
         headers=headers,
         sample_rows=sample_rows,
         column_types=column_types,
@@ -197,6 +173,104 @@ def profile_excel(file_bytes: bytes) -> SpreadsheetProfile:
         total_data_rows=total_data_rows,
         has_multi_header=has_multi_header,
     )
+
+
+def profile_excel(file_bytes: bytes) -> SpreadsheetProfile:
+    """Profile an Excel file's active worksheet structure, headers, sample rows, and data types."""
+    if not file_bytes:
+        raise ValidationException(
+            errors={"file": "Empty spreadsheet file", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+            message="Spreadsheet contains no data rows",
+            error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+        )
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        logger.error(f"Error loading Excel workbook for profiling: {e}", exc_info=True)
+        raise ValidationException(
+            errors={"file": f"Invalid or corrupt Excel workbook: {str(e)}", "error_code": ErrorCodeRegistry.RPT_MALFORMED_FILE},
+            message="Malformed or corrupt spreadsheet file",
+            error_code=ErrorCodeRegistry.RPT_MALFORMED_FILE,
+        )
+
+    try:
+        sheet_names = wb.sheetnames
+        if not sheet_names:
+            raise ValidationException(
+                errors={"file": "Workbook contains no worksheets", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                message="Spreadsheet contains no data rows",
+                error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+            )
+
+        sheet = wb.active
+        if sheet is None:
+            sheet = wb[sheet_names[0]]
+
+        profile = _profile_worksheet(sheet, sheet_names)
+        if profile is None:
+            raise ValidationException(
+                errors={"file": "Spreadsheet contains no data rows", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                message="Spreadsheet contains no data rows",
+                error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+            )
+        return profile
+    finally:
+        wb.close()
+
+
+def profile_excel_workbook(file_bytes: bytes) -> WorkbookProfile:
+    """
+    Profile every worksheet in an Excel workbook independently.
+    Raises ValidationException if file is invalid or no worksheets contain data.
+    """
+    if not file_bytes:
+        raise ValidationException(
+            errors={"file": "Empty spreadsheet file", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+            message="Spreadsheet contains no data rows",
+            error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+        )
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        logger.error(f"Error loading Excel workbook for profiling: {e}", exc_info=True)
+        raise ValidationException(
+            errors={"file": f"Invalid or corrupt Excel workbook: {str(e)}", "error_code": ErrorCodeRegistry.RPT_MALFORMED_FILE},
+            message="Malformed or corrupt spreadsheet file",
+            error_code=ErrorCodeRegistry.RPT_MALFORMED_FILE,
+        )
+
+    try:
+        sheet_names = wb.sheetnames
+        if not sheet_names:
+            raise ValidationException(
+                errors={"file": "Workbook contains no worksheets", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                message="Spreadsheet contains no data rows",
+                error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+            )
+
+        profiles: List[SpreadsheetProfile] = []
+        skipped: List[str] = []
+
+        for name in sheet_names:
+            sheet = wb[name]
+            p = _profile_worksheet(sheet, sheet_names)
+            if p is None:
+                skipped.append(name)
+            else:
+                profiles.append(p)
+
+        if not profiles:
+            raise ValidationException(
+                errors={"file": "Spreadsheet contains no data rows across any worksheet", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                message="Spreadsheet contains no data rows",
+                error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+            )
+
+        return WorkbookProfile(sheet_profiles=profiles, skipped_sheets=skipped)
+    finally:
+        wb.close()
 
 
 def profile_csv(file_bytes: bytes) -> SpreadsheetProfile:

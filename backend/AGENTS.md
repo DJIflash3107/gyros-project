@@ -30,6 +30,8 @@ Read it fully before modifying any code.
 21. [Business Operations Agent (LangGraph)](#21-business-operations-agent-langgraph)
 22. [Sales Report Processing & Staging Workflow](#22-sales-report-processing--staging-workflow)
 23. [Dynamic Profiling & LLM Semantic Mapping](#23-dynamic-profiling--llm-semantic-mapping)
+24. [Multi-Sheet Workbook Processing](#24-multi-sheet-workbook-processing)
+25. [Demand Forecasting Service](#25-demand-forecasting-service)
 
 ---
 
@@ -84,13 +86,14 @@ backend/
 │   │   ├── agent_handler.py                  # Agent streaming chat handler (SSE StreamingResponse)
 │   │   ├── ai_handler.py                     # AI endpoints handler (models, health, completions)
 │   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
-│   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates
+│   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates (including bulk)
 │   │   ├── sales_report_observation_handler.py# Confirmed sales observation queries
+│   │   ├── forecasting_handler.py            # Forecasting predict, evaluate, and sufficiency handlers
 │   │   ├── import_issue_handler.py           # Import validation issue queries
 │   │   ├── product_alias_handler.py          # Product alias management
 │   │   └── <entity>_handler.py               # HTTP-layer functions (request → response)
 │   ├── helpers/
-│   │   ├── error_codes.py    # ErrorCodeRegistry (standard, AI, agent, report processing codes)
+│   │   ├── error_codes.py    # ErrorCodeRegistry (standard, AI, agent, report processing, forecasting)
 │   │   ├── exceptions.py     # AppException hierarchy (includes AIServiceException, etc.)
 │   │   ├── logging.py        # setup_logging(), logger, request_id_var, error_code_var
 │   │   ├── pagination.py     # paginate() helper
@@ -102,8 +105,10 @@ backend/
 │   │   ├── __init__.py       # Imports all ORM models so Alembic can discover them
 │   │   ├── types.py          # BigIntId, IntUnsigned — dialect-aware column types
 │   │   ├── sales_report_submission.py   # Ingestion submissions (status, sha256, counters)
-│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, review status)
+│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, review status, source sheet)
 │   │   ├── sales_report_observation.py  # Confirmed observations (unique business/branch/product/period)
+│   │   ├── forecast_run.py              # Forecast runs metadata (model type, params, error metrics)
+│   │   ├── forecast_result.py           # Forecast period points (point, lower, upper bounds)
 │   │   ├── import_issue.py              # Staging validation & extraction issues
 │   │   ├── product_alias.py             # Raw name to product alias mapping
 │   │   └── <entity>.py       # One file per SQLAlchemy model
@@ -112,8 +117,9 @@ backend/
 │   │   ├── ai.py                     # Pydantic schemas for AI models, health, and chat
 │   │   ├── sales_report_processing.py # ManualFormBatchCreate, ProcessingResultResponse, SSE schemas
 │   │   ├── sales_report_submission.py # Submission Create/Update/Response
-│   │   ├── sales_report_staging_row.py# Staging row Create/Update/Response
+│   │   ├── sales_report_staging_row.py# Staging row Create/Update/BulkUpdate/Response
 │   │   ├── sales_report_observation.py# Confirmed observation schemas
+│   │   ├── forecasting.py            # ForecastRequest, ForecastEvaluateRequest, ForecastRunResponse
 │   │   ├── import_issue.py           # Import issue schemas
 │   │   ├── product_alias.py          # Product alias schemas
 │   │   └── <entity>.py               # Pydantic schemas for that entity
@@ -122,8 +128,9 @@ backend/
 │   │   ├── agent_routes.py               # /api/v1/agent routes (POST chat)
 │   │   ├── ai_routes.py                  # /api/v1/ai routes (models, health, chat)
 │   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
-│   │   ├── sales_report_staging_row_routes.py
+│   │   ├── sales_report_staging_row_routes.py# Staging rows CRUD and /bulk update
 │   │   ├── sales_report_observation_routes.py
+│   │   ├── forecasting_routes.py         # /api/v1/businesses/{id}/forecasting (predict, evaluate, sufficiency)
 │   │   ├── import_issue_routes.py
 │   │   ├── product_alias_routes.py
 │   │   └── <entity>_routes.py            # APIRouter + path declarations
@@ -132,13 +139,15 @@ backend/
 │   │   ├── ai_service.py                     # AI discovery, capability inference, chat logic
 │   │   ├── sales_report_processing_service.py # Orchestrator: spreadsheet/photo/form -> staging
 │   │   ├── input_profiler.py                 # Structural profiler (headers, types, sample data, merged cells)
-│   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapping
-│   │   ├── spreadsheet_parser.py             # Excel/CSV parser with dynamic mapping + static fallback
+│   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapping & sheet role classifier
+│   │   ├── spreadsheet_parser.py             # Excel/CSV parser with dynamic mapping + multi-sheet support
 │   │   ├── photo_extractor.py                # AMD VLM extraction with SSE progress streaming
 │   │   ├── validation_engine.py              # 10-step centralized validation & alias resolution
 │   │   ├── sales_report_submission_service.py # Submissions CRUD & atomic observation confirmation
-│   │   ├── sales_report_staging_row_service.py# Staging row persistence & status updates
+│   │   ├── sales_report_staging_row_service.py# Staging row persistence & bulk status updates
 │   │   ├── sales_report_observation_service.py# Confirmed observations & overlap checks
+│   │   ├── forecasting_engine.py             # Predictive time-series models (SMA, EMA, Holt-Winters, Backtesting)
+│   │   ├── forecasting_service.py            # Forecasting orchestration, validation & DB persistence
 │   │   ├── import_issue_service.py           # Issue persistence
 │   │   ├── product_alias_service.py          # Alias resolution
 │   │   └── <entity>_service.py               # Business logic and DB interaction
@@ -152,7 +161,11 @@ backend/
 │   ├── test_ai_endpoints.py              # Tests for /api/v1/ai routes
 │   ├── test_amd_client.py                # Tests for AMDTokenFactoryClient
 │   ├── test_sales_report_processing.py   # Multi-channel ingestion, validation, and confirmation tests
+│   ├── test_multi_sheet_processing.py    # Multi-sheet Excel workbook ingestion tests
+│   ├── test_sales_report_staging_row_bulk.py # Staging row bulk update tests
 │   ├── test_semantic_mapping.py          # Profiler, LLM semantic mapper, and fallback tests
+│   ├── test_forecasting_engine.py        # Forecasting models (SMA, EMA, Holt-Winters) tests
+│   ├── test_forecasting_endpoints.py     # Forecasting predict, evaluate, and sufficiency tests
 │   ├── test_sales_submissions.py         # Submissions CRUD and review lifecycle
 │   └── test_*.py                         # Feature-grouped test files
 ├── .env                      # Local secrets (git-ignored)
@@ -674,17 +687,20 @@ pytest -v
 ### Test Commands
 
 ```bash
-# Run all tests
+# Run all tests (141 tests)
 pytest
+
+# Run sales report processing, multi-sheet, bulk update, and semantic mapping tests
+pytest tests/test_sales_report_processing.py tests/test_multi_sheet_processing.py tests/test_sales_report_staging_row_bulk.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
+
+# Run forecasting tests (engine and endpoints)
+pytest tests/test_forecasting_engine.py tests/test_forecasting_endpoints.py -v
 
 # Run agent tests
 pytest tests/test_agent_auth.py tests/test_agent_tools.py tests/test_agent_graph.py tests/test_agent_streaming.py -v
 
 # Run AI provider tests
 pytest tests/test_amd_client.py tests/test_ai_endpoints.py -v
-
-# Run sales report processing and semantic mapping tests
-pytest tests/test_sales_report_processing.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
 ```
 
 ### Rules
@@ -1032,9 +1048,46 @@ Terminal event: `data: [DONE]\n\n`.
 | `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Member | Get submission details and processing summary. |
 | `PATCH` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Owner / Admin / Manager | Update submission metadata or review note. |
 | `DELETE` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Owner / Admin | Delete submission and cascade delete staging rows. |
-| `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}/staging_rows` | Member | List staging rows with review status filter. |
-| `PATCH` | `/api/v1/businesses/{b_id}/sales_report_staging_rows/{row_id}` | Member | Correct staging row values (e.g. resolve product). |
+| `GET` | `/api/v1/sales_report_submissions/{s_id}/staging_rows` | Member | List staging rows with review status filter. |
+| `PATCH` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/bulk` | Member | Bulk update staging rows (all or by ID list, e.g. mark `ready`). |
+| `POST` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/bulk` | Member | Alternative method for bulk update. |
+| `GET` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/{row_id}` | Member | Get single staging row details. |
+| `PATCH` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/{row_id}` | Member | Correct staging row values (e.g. resolve product). |
+| `DELETE` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/{row_id}` | Member | Delete individual staging row. |
 | `GET` | `/api/v1/businesses/{b_id}/sales_report_observations` | Member | Query confirmed observations (analytics / BI). |
+| `GET` | `/api/v1/sales_report_submissions/{s_id}/import_issues` | Member | Query extraction and validation issues. |
+
+### Bulk Staging Row Review & Update
+
+To allow fast operator reviews without editing rows one by one, the API provides a dedicated bulk update endpoint:
+
+`PATCH /api/v1/sales_report_submissions/{submission_id}/staging_rows/bulk` (also accepts `POST`)
+
+**Schema (`SalesReportStagingRowBulkUpdate`):**
+- `apply_to_all: bool` — If `true`, applies updates to all staging rows under the submission.
+- `row_ids: Optional[list[int]]` — List of specific staging row IDs to update.
+- `filter_review_status: Optional[ReviewStatus]` — Optional filter (e.g. only update rows currently `needs_correction` or `pending_review`).
+- Target fields to update: `review_status`, `review_notes`, `branch_id`, `product_id`.
+
+**Validation Rules:**
+- At least one target selection must be provided (`apply_to_all=True` or a non-empty `row_ids` list); otherwise returns `422 Unprocessable Entity`.
+- At least one update field (`review_status`, `review_notes`, `branch_id`, or `product_id`) must be provided.
+
+**Example Request:**
+```json
+{
+  "apply_to_all": true,
+  "review_status": "ready",
+  "review_notes": "Bulk approved by manager"
+}
+```
+
+### Master Data Resolution Invariant
+
+During ingestion, the pipeline **NEVER automatically creates new Product or Branch records** in the master tables:
+1. If a product cannot be resolved by ID, exact name, case-insensitive name, or alias, `RPT-VAL-001` (Severity: `error`) is emitted, and the row enters staging with `product_id=None` and `review_status="needs_correction"`.
+2. If a branch ID is missing, inactive, or belongs to another business, `RPT-VAL-002` (Severity: `error`) is emitted, and the row enters staging with `branch_id=None` and `review_status="needs_correction"`.
+3. During confirmation (`/confirm`), rows lacking `product_id` or `branch_id` are strictly rejected and blocked from observation conversion until the operator creates the master entity or alias and updates the staging row.
 
 ---
 
@@ -1086,3 +1139,120 @@ The semantic mapper targets a fixed canonical dictionary (`CANONICAL_FIELDS`):
 1. **Graceful Fallback:** If `SEMANTIC_MAPPING_ENABLED=False`, `AMD_API_KEY` is not configured, or the LLM request times out/fails, the parser automatically falls back to the static `COLUMN_MAPPING` dictionary.
 2. **Confidence Thresholding:** Columns mapped below `SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD` (default: `0.7`) emit `ERR-RPT-021` warning issues on staging rows for human operator review.
 3. **Auditability:** Every staging row persists the mapping metadata (`mapping_method`, `model`, `column_confidences`, `warnings`) inside `extraction_confidence_json`.
+
+---
+
+## 24. Multi-Sheet Workbook Processing
+
+When users upload an Excel workbook (`.xlsx`), the import pipeline automatically processes all relevant worksheets instead of only the active sheet.
+
+### Workflow & Architecture
+
+1. **Independent Per-Sheet Profiling (`input_profiler.py`):**
+   - `profile_excel_workbook(file_bytes)` inspects every sheet independently.
+   - Extracts sheet name, headers, sample rows, merged cells, and inferred data types.
+   - Sheets with no headers or zero data rows are automatically collected in `skipped_sheets`.
+
+2. **Semantic Role Classification (`semantic_mapper.py`):**
+   - `classify_sheet_roles(profiles, biz_context)` sends structural summaries of all sheets to the AMD Token Factory LLM in a single consolidated prompt.
+   - Sheets are classified into:
+     - `sales`: Transactions, daily branch status, order quantities, sold quantities, leftover stocks, or revenue.
+     - `reference`: Product masters, price lists, branch directories (retained to enrich business matching context).
+     - `instructional`: Template guides, notes, legends (safely skipped).
+     - `expenses`: Costs, petty cash, purchase invoices (unsupported for sales observation, skipped).
+     - `ambiguous`: Unrecognized layouts or non-standard structures (flagged for review with `ERR-RPT-023`).
+   - If the LLM is unavailable or disabled, `build_fallback_sheet_classifications` provides deterministic keyword-based heuristics.
+
+3. **Per-Sheet Column Mapping & Parsing (`spreadsheet_parser.py`):**
+   - Each sheet classified as `sales` receives its own semantic mapping (or fallback) based on its distinct columns.
+   - `parse_excel_workbook(file_bytes, sheet_mappings)` parses each sales sheet independently.
+   - Handles repeated header rows (e.g. from page breaks) and intermediate blank rows cleanly.
+   - Attaches `source_sheet_name` and relative `source_row_number` to each row for precise auditing.
+
+4. **Cross-Sheet Duplicate Prevention (`sales_report_processing_service.py`):**
+   - `_deduplicate_cross_sheet(raw_rows)` checks a composite key: `(raw_product, branch, period_start, period_end)`.
+   - If a duplicate record appears in a subsequent sheet, it is omitted from staging and flagged with `ERR-RPT-022` warning issue (`RPT_CROSS_SHEET_DUPLICATE`) with the source sheet and row reference.
+
+5. **Staging & Review Auditability:**
+   - Every staging row stores `source_sheet_name` in the database and API responses.
+   - `ProcessingSummary` returns `sheets_processed`, `sheets_skipped`, and `sheets_ambiguous`.
+   - Ambiguous sheets produce actionable warning issues without failing the rest of the valid sales sheets.
+
+---
+
+## 25. Demand Forecasting Service
+
+The Demand Forecasting Service generates predictive time-series forecasts and backtesting evaluations for inventory and sales planning, based on historical confirmed observations (`SalesReportObservation`).
+
+### Architecture & Components
+
+```
+Client / Agent
+      │
+      ▼
+forecasting_routes.py (/api/v1/businesses/{business_id}/forecasting)
+      │
+      ▼
+forecasting_handler.py (Request unpacking & standardized response format)
+      │
+      ▼
+forecasting_service.py (Business checks, historical queries, persistence)
+      │
+      ▼
+forecasting_engine.py (Pure computational algorithms: SMA, EMA, Holt-Winters, Backtesting)
+      │
+      ▼
+Database (MySQL / SQLite)
+   ├── forecast_runs (Run metadata, parameters, model used, evaluation metrics)
+   └── forecast_results (Per-period predicted points with confidence intervals)
+```
+
+| Component | File | Responsibility |
+|---|---|---|
+| Engine | `app/services/forecasting_engine.py` | Statistical forecasting algorithms (SMA, EMA, Holt-Winters), backtesting, and error metrics (MAE, WAPE, Bias). |
+| Service | `app/services/forecasting_service.py` | Multi-tenant observation retrieval, data sufficiency validation, execution orchestration, and DB persistence. |
+| Handler | `app/handlers/forecasting_handler.py` | HTTP-layer handlers building standard response envelopes. |
+| Routes | `app/routes/forecasting_routes.py` | FastAPI router mounted under `/api/v1/businesses/{business_id}/forecasting` (and `/api/v1/forecasting`). |
+| Models | `app/models/forecast_run.py`, `app/models/forecast_result.py` | SQLAlchemy ORM models for runs and period results. |
+| Schemas | `app/models/schemas/forecasting.py` | Pydantic schemas: `ForecastRequest`, `ForecastEvaluateRequest`, `ForecastRunResponse`, `DataSufficiencyResponse`. |
+
+### Forecasting Models
+
+1. **Simple Moving Average (SMA):**
+   - Computes rolling arithmetic mean over recent observation periods.
+   - Suitable for stable, low-volatility products.
+2. **Exponential Moving Average (EMA):**
+   - Applies exponential weighting factor (`alpha`), giving more weight to recent observations.
+   - Best for fast-moving items with short-term trend shifts.
+3. **Holt-Winters Exponential Smoothing:**
+   - Triple exponential smoothing with level (`alpha`), trend (`beta`), and seasonal (`gamma`) smoothing parameters.
+   - Supports additive and multiplicative seasonality patterns for cyclical product demand.
+4. **Heuristic Fallback:**
+   - If historical observations are sparse or insufficient for higher-order models, gracefully falls back to simple mean or zero baselines without crashing.
+
+### Historical Data Sufficiency (`/sufficiency`)
+
+Before running a forecast, clients can inspect data sufficiency:
+- **Daily granularity:** Requires at least 14 historical observations.
+- **Weekly granularity:** Requires at least 8 historical observations.
+- **Monthly granularity:** Requires at least 6 historical observations.
+- Returns `is_sufficient: bool`, `observation_count: int`, and `recommended_model: str`.
+
+### Backtesting & Evaluation (`/evaluate`)
+
+Backtesting splits historical observations into training and test sets in chronological order:
+- **MAE (Mean Absolute Error):** Average magnitude of forecast errors in raw units.
+- **WAPE (Weighted Absolute Percentage Error):** Normalized percentage error across all evaluated periods.
+- **Bias Percentage:** Measures systematic over-forecasting or under-forecasting tendencies.
+- Returns actual vs. predicted values for each backtested time point.
+
+### Endpoints Reference
+
+| Method | Path | Auth / Role | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/businesses/{b_id}/forecasting/predict` | Owner / Admin / Manager | Generate and persist a demand forecast run and result points. |
+| `POST` | `/api/v1/businesses/{b_id}/forecasting/evaluate` | Owner / Admin / Manager | Run historical backtesting and return MAE, WAPE, and bias metrics. |
+| `GET` | `/api/v1/businesses/{b_id}/forecasting/sufficiency` | Member | Check if sufficient observation history exists for forecasting. |
+| `GET` | `/api/v1/businesses/{b_id}/forecasting/runs` | Member | List past forecast runs with pagination and status filters. |
+| `GET` | `/api/v1/businesses/{b_id}/forecasting/runs/{run_id}` | Member | Retrieve a specific forecast run with all period predicted points. |
+

@@ -1,6 +1,7 @@
 from datetime import date
 import hashlib
 import json
+import re
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
@@ -21,9 +22,27 @@ from app.configs.settings import settings
 from app.helpers.error_codes import ErrorCodeRegistry
 from app.helpers.exceptions import ConflictException, ValidationException, NotFoundException
 from app.helpers.logging import logger
-from app.services.input_profiler import profile_excel, profile_csv
-from app.services.semantic_mapper import map_columns_with_llm, SemanticMappingResult
-from app.services.spreadsheet_parser import parse_spreadsheet, is_excel_content
+from app.services.input_profiler import (
+    profile_excel,
+    profile_csv,
+    profile_excel_workbook,
+    WorkbookProfile,
+)
+from app.services.semantic_mapper import (
+    map_columns_with_llm,
+    classify_sheet_roles,
+    build_fallback_mapping,
+    SemanticMappingResult,
+    SheetClassification,
+)
+from app.services.spreadsheet_parser import (
+    parse_spreadsheet,
+    parse_csv,
+    parse_excel,
+    parse_excel_workbook,
+    is_excel_content,
+    normalize_header,
+)
 from app.services.photo_extractor import extract_from_photo
 from app.services.validation_engine import validate_staging_rows
 
@@ -77,6 +96,63 @@ def check_duplicate_submission(
         )
 
 
+def _deduplicate_cross_sheet(
+    rows: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[ImportIssueCreate]]:
+    """
+    Prevent duplicate imports or double-counting across sheets by checking
+    a normalized composite key: (raw_product, branch, period_start, period_end).
+    If a record from a subsequent sheet matches an already seen record from an earlier sheet,
+    it is filtered out and flagged as an ImportIssue.
+    """
+    seen: Dict[Tuple[str, str, str, str], Tuple[str, int]] = {}
+    unique_rows: List[Dict[str, Any]] = []
+    issues: List[ImportIssueCreate] = []
+
+    for row in rows:
+        sheet_name = str(row.get("source_sheet_name") or "")
+        row_num = row.get("source_row_number")
+
+        raw_prod = str(
+            row.get("raw_product_name")
+            or row.get("product")
+            or row.get("item")
+            or row.get("product_id")
+            or ""
+        ).strip().lower()
+
+        if not raw_prod:
+            unique_rows.append(row)
+            continue
+
+        branch = str(row.get("branch_id") or row.get("branch") or "").strip()
+        p_start = str(row.get("period_start") or row.get("date") or "").strip()
+        p_end = str(row.get("period_end") or p_start or "").strip()
+
+        key = (raw_prod, branch, p_start, p_end)
+        if key in seen:
+            orig_sheet, orig_row = seen[key]
+            issues.append(
+                ImportIssueCreate(
+                    source_row_number=row_num,
+                    field_name="raw_product_name",
+                    issue_code=ErrorCodeRegistry.RPT_CROSS_SHEET_DUPLICATE,
+                    severity="warning",
+                    message=(
+                        f"Duplicate record detected across worksheets. Product '{raw_prod}' "
+                        f"in worksheet '{sheet_name}' (row {row_num}) was already provided in "
+                        f"worksheet '{orig_sheet}' (row {orig_row}); row skipped to prevent double-counting."
+                    ),
+                    raw_value=f"{sheet_name}!row_{row_num}",
+                )
+            )
+        else:
+            seen[key] = (sheet_name, row_num if row_num is not None else 0)
+            unique_rows.append(row)
+
+    return unique_rows, issues
+
+
 def _persist_staging_rows_and_issues(
     db: Session,
     submission_id: int,
@@ -91,6 +167,7 @@ def _persist_staging_rows_and_issues(
         staging_row = SalesReportStagingRow(
             submission_id=submission_id,
             source_row_number=row_data.source_row_number,
+            source_sheet_name=row_data.source_sheet_name,
             raw_payload_json=row_data.raw_payload_json,
             raw_product_name=row_data.raw_product_name,
             branch_id=row_data.branch_id,
@@ -262,25 +339,115 @@ def process_file_submission(
 
     try:
         # Extract rows
-        mapping_result = None
-        if input_method == "spreadsheet":
-            if settings.SEMANTIC_MAPPING_ENABLED:
-                try:
-                    is_excel = is_excel_content(mime_type, file_name)
-                    profile = profile_excel(file_bytes) if is_excel else profile_csv(file_bytes)
-                    products = (
-                        db.query(Product)
-                        .filter(Product.business_id == business_id, Product.is_active == True)
-                        .all()
-                    )
-                    biz_context = {"products": [{"name": p.name} for p in products]}
-                    mapping_result = _run_coroutine_sync(map_columns_with_llm(profile, biz_context))
-                except Exception as e:
-                    logger.warning(f"Failed to profile or semantically map spreadsheet: {e}. Falling back to default parsing.")
-                    mapping_result = None
+        mapping_results: List[SemanticMappingResult] = []
+        sheets_processed: List[str] = []
+        sheets_skipped: List[str] = []
+        sheets_ambiguous: List[str] = []
+        extra_issues: List[ImportIssueCreate] = []
 
-            raw_rows, _ = parse_spreadsheet(file_bytes, mime_type, file_name, mapping_result=mapping_result)
-            is_vision = False
+        if input_method == "spreadsheet":
+            is_excel = is_excel_content(mime_type, file_name)
+            products = (
+                db.query(Product)
+                .filter(Product.business_id == business_id, Product.is_active == True)
+                .all()
+            )
+            known_prod_names = {p.name for p in products if p.name}
+            biz_context = {"products": [{"name": p.name} for p in products]}
+
+            if is_excel:
+                workbook_profile = profile_excel_workbook(file_bytes)
+                sheets_skipped.extend(workbook_profile.skipped_sheets)
+
+                classifications = _run_coroutine_sync(
+                    classify_sheet_roles(workbook_profile.sheet_profiles, biz_context)
+                )
+
+                reference_sheets: List[str] = []
+                for cls in classifications:
+                    if cls.role == "sales":
+                        sheets_processed.append(cls.sheet_name)
+                    elif cls.role == "reference":
+                        reference_sheets.append(cls.sheet_name)
+                        sheets_skipped.append(cls.sheet_name)
+                    elif cls.role in ("instructional", "expenses"):
+                        sheets_skipped.append(cls.sheet_name)
+                    else:  # ambiguous
+                        sheets_ambiguous.append(cls.sheet_name)
+                        extra_issues.append(
+                            ImportIssueCreate(
+                                source_row_number=None,
+                                issue_code=ErrorCodeRegistry.RPT_AMBIGUOUS_SHEET,
+                                severity="warning",
+                                message=f"Worksheet '{cls.sheet_name}' has an unsupported or ambiguous layout and was skipped for review. Reason: {cls.reasoning or 'Unrecognized table structure'}",
+                                raw_value=cls.sheet_name,
+                            )
+                        )
+
+                # Retain relevant reference sheets for matching
+                for p in workbook_profile.sheet_profiles:
+                    if p.active_sheet_name in reference_sheets:
+                        for idx, h in enumerate(p.headers):
+                            h_clean = re.sub(r"[^a-zA-Z0-9]+", "_", str(h).strip().lower()).strip("_")
+                            if h_clean in ("product", "product_name", "nama_produk", "item", "nama"):
+                                for s_row in p.sample_rows:
+                                    if idx < len(s_row) and s_row[idx]:
+                                        val = str(s_row[idx]).strip()
+                                        if val and val not in known_prod_names:
+                                            biz_context["products"].append({"name": val})
+                                            known_prod_names.add(val)
+
+                if not sheets_processed:
+                    raise ValidationException(
+                        errors={"file": "Workbook contains no worksheets classified with sales report data", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                        message="Spreadsheet contains no data rows",
+                        error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
+                    )
+
+                # Map columns per sales sheet
+                sheet_mappings: Dict[str, Optional[SemanticMappingResult]] = {}
+                profile_by_name = {p.active_sheet_name: p for p in workbook_profile.sheet_profiles}
+
+                for s_name in sheets_processed:
+                    s_profile = profile_by_name[s_name]
+                    m_res = None
+                    if settings.SEMANTIC_MAPPING_ENABLED:
+                        try:
+                            m_res = _run_coroutine_sync(map_columns_with_llm(s_profile, biz_context))
+                        except Exception as e:
+                            logger.warning(f"Failed to profile or semantically map sheet {s_name}: {e}. Falling back to default mapping.")
+                            m_res = build_fallback_mapping(s_profile.headers, reason=f"Semantic mapping error: {str(e)}")
+                    else:
+                        m_res = build_fallback_mapping(s_profile.headers, reason="Semantic mapping disabled")
+                    sheet_mappings[s_name] = m_res
+                    if m_res:
+                        mapping_results.append(m_res)
+
+                raw_rows, _ = parse_excel_workbook(file_bytes, sheet_mappings)
+                # Prevent duplicate imports or double-counting across sheets
+                raw_rows, cross_sheet_issues = _deduplicate_cross_sheet(raw_rows)
+                extra_issues.extend(cross_sheet_issues)
+                is_vision = False
+
+            else:
+                # CSV parsing path
+                sheets_processed.append("CSV")
+                profile = profile_csv(file_bytes)
+                if settings.SEMANTIC_MAPPING_ENABLED:
+                    try:
+                        m_res = _run_coroutine_sync(map_columns_with_llm(profile, biz_context))
+                    except Exception as e:
+                        logger.warning(f"Failed to profile or semantically map CSV: {e}. Falling back to default parsing.")
+                        m_res = build_fallback_mapping(profile.headers, reason=f"Semantic mapping error: {str(e)}")
+                else:
+                    m_res = build_fallback_mapping(profile.headers, reason="Semantic mapping disabled")
+
+                if m_res:
+                    mapping_results.append(m_res)
+
+                raw_rows, _ = parse_csv(file_bytes, mapping_result=m_res)
+                is_vision = False
+
         else:
             # Synchronous photo path
             products = (
@@ -306,19 +473,23 @@ def process_file_submission(
         )
 
         # Low-confidence semantic mapping warning issues
-        if mapping_result and mapping_result.mappings:
-            for entry in mapping_result.mappings:
-                if entry.confidence < settings.SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD:
-                    issues_create.append(
-                        ImportIssueCreate(
-                            source_row_number=None,
-                            field_name=entry.target_field if entry.target_field != "_skip" else None,
-                            issue_code=ErrorCodeRegistry.RPT_LOW_CONFIDENCE,
-                            severity="warning",
-                            message=f"Column '{entry.source_column}' mapped to '{entry.target_field}' with low confidence ({entry.confidence:.0%}). Reason: {entry.reasoning or 'Ambiguous mapping'}",
-                            raw_value=entry.source_column,
+        for m_res in mapping_results:
+            if m_res and m_res.mappings:
+                for entry in m_res.mappings:
+                    if entry.confidence < settings.SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD:
+                        issues_create.append(
+                            ImportIssueCreate(
+                                source_row_number=None,
+                                field_name=entry.target_field if entry.target_field != "_skip" else None,
+                                issue_code=ErrorCodeRegistry.RPT_LOW_CONFIDENCE,
+                                severity="warning",
+                                message=f"Column '{entry.source_column}' mapped to '{entry.target_field}' with low confidence ({entry.confidence:.0%}). Reason: {entry.reasoning or 'Ambiguous mapping'}",
+                                raw_value=entry.source_column,
+                            )
                         )
-                    )
+
+        # Append ambiguous sheet warnings and cross-sheet duplicate issues
+        issues_create.extend(extra_issues)
 
         # Persist rows and issues
         created_rows, created_issues, summary = _persist_staging_rows_and_issues(
@@ -327,6 +498,11 @@ def process_file_submission(
             staging_rows_create=staging_rows_create,
             issues_create=issues_create,
         )
+
+        # Enrich summary with sheet metrics
+        summary.sheets_processed = sheets_processed
+        summary.sheets_skipped = sheets_skipped
+        summary.sheets_ambiguous = sheets_ambiguous
 
         submission.status = "reviewed"
         submission.total_rows = summary.total_rows

@@ -27,7 +27,10 @@ from app.routes import (
     product_price_history_router,
     ai_router,
     agent_router,
+    forecasting_router,
+    direct_forecasting_router,
 )
+
 from contextlib import asynccontextmanager
 from app.configs.amd_client import close_amd_client
 
@@ -133,3 +136,5 @@ app.include_router(product_cost_history_router)
 app.include_router(product_price_history_router)
 app.include_router(ai_router)
 app.include_router(agent_router)
+app.include_router(forecasting_router)
+app.include_router(direct_forecasting_router)

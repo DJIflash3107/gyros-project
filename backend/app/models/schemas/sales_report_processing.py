@@ -58,6 +58,9 @@ class ProcessingSummary(BaseModel):
     pending_review_rows: int = 0
     needs_correction_rows: int = 0
     issue_count: int = 0
+    sheets_processed: List[str] = Field(default_factory=list)
+    sheets_skipped: List[str] = Field(default_factory=list)
+    sheets_ambiguous: List[str] = Field(default_factory=list)
 
 
 class ProcessingResultResponse(BaseModel):

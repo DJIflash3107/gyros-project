@@ -5,6 +5,7 @@ from app.models.sales_report_staging_row import SalesReportStagingRow
 from app.models.schemas.sales_report_staging_row import (
     SalesReportStagingRowCreate,
     SalesReportStagingRowUpdate,
+    SalesReportStagingRowBulkUpdate,
 )
 from app.helpers.exceptions import NotFoundException
 from app.helpers.pagination import paginate_query
@@ -102,3 +103,52 @@ def delete_staging_row(db: Session, submission_id: int, row_id: int) -> None:
     row = get_staging_row(db, submission_id, row_id)
     db.delete(row)
     db.commit()
+
+
+def bulk_update_staging_rows(
+    db: Session,
+    submission_id: int,
+    data: SalesReportStagingRowBulkUpdate,
+) -> list[SalesReportStagingRow]:
+    submission = db.query(SalesReportSubmission).filter(
+        SalesReportSubmission.id == submission_id
+    ).first()
+    if not submission:
+        raise NotFoundException(
+            message="Submission not found",
+            errors={"submission_id": f"Submission with ID {submission_id} does not exist"},
+        )
+
+    query = db.query(SalesReportStagingRow).filter(
+        SalesReportStagingRow.submission_id == submission_id
+    )
+
+    if not data.apply_to_all and data.row_ids:
+        query = query.filter(SalesReportStagingRow.id.in_(data.row_ids))
+
+    if data.filter_review_status:
+        query = query.filter(SalesReportStagingRow.review_status == data.filter_review_status)
+
+    rows = query.order_by(SalesReportStagingRow.id.asc()).all()
+
+    update_fields = {}
+    if data.review_status is not None:
+        update_fields["review_status"] = data.review_status
+    if data.review_notes is not None:
+        update_fields["review_notes"] = data.review_notes
+    if data.branch_id is not None:
+        update_fields["branch_id"] = data.branch_id
+    if data.product_id is not None:
+        update_fields["product_id"] = data.product_id
+
+    for row in rows:
+        for key, value in update_fields.items():
+            setattr(row, key, value)
+
+    if rows:
+        db.commit()
+        for row in rows:
+            db.refresh(row)
+
+    return rows
+

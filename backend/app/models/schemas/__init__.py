@@ -7,7 +7,12 @@ from app.models.schemas.branch import BranchCreate, BranchUpdate, BranchResponse
 from app.models.schemas.product import ProductCreate, ProductUpdate, ProductResponse
 from app.models.schemas.product_alias import ProductAliasCreate, ProductAliasUpdate, ProductAliasResponse
 from app.models.schemas.sales_report_submission import SalesReportSubmissionCreate, SalesReportSubmissionUpdate, SalesReportSubmissionResponse
-from app.models.schemas.sales_report_staging_row import SalesReportStagingRowCreate, SalesReportStagingRowUpdate, SalesReportStagingRowResponse
+from app.models.schemas.sales_report_staging_row import (
+    SalesReportStagingRowCreate,
+    SalesReportStagingRowUpdate,
+    SalesReportStagingRowBulkUpdate,
+    SalesReportStagingRowResponse,
+)
 from app.models.schemas.sales_report_observation import SalesReportObservationCreate, SalesReportObservationUpdate, SalesReportObservationResponse
 from app.models.schemas.import_issue import ImportIssueCreate, ImportIssueUpdate, ImportIssueResponse
 from app.models.schemas.expense import ExpenseCreate, ExpenseUpdate, ExpenseResponse
@@ -37,6 +42,16 @@ from app.models.schemas.agent import (
     AgentSSEEvent,
     AgentChatRequest,
 )
+from app.models.schemas.forecasting import (
+    ForecastRequest,
+    ForecastEvaluateRequest,
+    ForecastPointResponse,
+    ForecastRunResponse,
+    ActualVsPredicted,
+    EvaluationResponse,
+    DataSufficiencyResponse,
+)
+
 
 __all__ = [
     "PaginationParams",
@@ -68,6 +83,7 @@ __all__ = [
     "SalesReportSubmissionResponse",
     "SalesReportStagingRowCreate",
     "SalesReportStagingRowUpdate",
+    "SalesReportStagingRowBulkUpdate",
     "SalesReportStagingRowResponse",
     "SalesReportObservationCreate",
     "SalesReportObservationUpdate",
@@ -107,4 +123,12 @@ __all__ = [
     "ValidationResultEvent",
     "ReportErrorEvent",
     "ReportCompleteEvent",
+    "ForecastRequest",
+    "ForecastEvaluateRequest",
+    "ForecastPointResponse",
+    "ForecastRunResponse",
+    "ActualVsPredicted",
+    "EvaluationResponse",
+    "DataSufficiencyResponse",
 ]
+

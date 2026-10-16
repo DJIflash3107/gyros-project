@@ -493,6 +493,7 @@ def validate_staging_rows(
 
         staging_row = SalesReportStagingRowCreate(
             source_row_number=source_row_num,
+            source_sheet_name=row_dict.get("source_sheet_name"),
             raw_payload_json=raw_payload,
             raw_product_name=raw_product_name or resolved_prod_name,
             branch_id=resolved_b_id,
