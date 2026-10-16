@@ -129,3 +129,27 @@ class AIConfigException(AppException):
         if errors is None:
             errors = {"ai": message}
         super().__init__(status_code=503, message=message, errors=errors, error_code=error_code)
+
+
+class AgentTimeoutException(AppException):
+    def __init__(
+        self,
+        message: str = "Agent request timed out",
+        errors: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = ErrorCodeRegistry.AGENT_TIMEOUT,
+    ):
+        if errors is None:
+            errors = {"agent": message}
+        super().__init__(status_code=408, message=message, errors=errors, error_code=error_code)
+
+
+class AgentCancelledException(AppException):
+    def __init__(
+        self,
+        message: str = "Agent request cancelled by client",
+        errors: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = ErrorCodeRegistry.AGENT_CANCELLED,
+    ):
+        if errors is None:
+            errors = {"agent": message}
+        super().__init__(status_code=499, message=message, errors=errors, error_code=error_code)

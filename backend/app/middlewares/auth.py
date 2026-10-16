@@ -1,5 +1,6 @@
 from typing import Optional, List, Callable
 from fastapi import Request, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from app.configs.database import get_db
 from app.configs.security import decode_access_token
@@ -7,27 +8,33 @@ from app.models.user import User
 from app.models.business_membership import BusinessMembership
 from app.helpers.exceptions import AuthenticationException, AuthorizationException
 
+# HTTPBearer security scheme registers the Swagger UI "Authorize" lock button
+http_bearer = HTTPBearer(auto_error=False, description="JWT Bearer token")
+
 
 def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
 ) -> User:
     """Dependency to extract and verify JWT token from Authorization header and return active User."""
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        raise AuthenticationException(
-            message="Authentication failed",
-            errors={"authentication": "Missing authorization token"},
-        )
+    token = credentials.credentials if credentials else None
 
-    parts = auth_header.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise AuthenticationException(
-            message="Authentication failed",
-            errors={"authentication": "Invalid authorization header format. Expected 'Bearer <token>'"},
-        )
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if not auth_header:
+            raise AuthenticationException(
+                message="Authentication failed",
+                errors={"authentication": "Missing authorization token"},
+            )
 
-    token = parts[1]
+        parts = auth_header.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise AuthenticationException(
+                message="Authentication failed",
+                errors={"authentication": "Invalid authorization header format. Expected 'Bearer <token>'"},
+            )
+        token = parts[1]
     payload = decode_access_token(token)
 
     user_id_str = payload.get("sub")

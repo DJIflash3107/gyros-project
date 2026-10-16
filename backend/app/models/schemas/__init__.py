@@ -14,6 +14,18 @@ from app.models.schemas.expense import ExpenseCreate, ExpenseUpdate, ExpenseResp
 from app.models.schemas.product_cost_history import ProductCostHistoryCreate, ProductCostHistoryUpdate, ProductCostHistoryResponse
 from app.models.schemas.product_price_history import ProductPriceHistoryCreate, ProductPriceHistoryUpdate, ProductPriceHistoryResponse
 from app.models.schemas.ai import AIModelInfo, AIHealthResponse, ChatMessage, ChatCompletionRequest
+from app.models.schemas.agent import (
+    AgentEventType,
+    AgentStatusEvent,
+    ToolStartEvent,
+    ToolResultEvent,
+    MessageDeltaEvent,
+    ApprovalRequiredEvent,
+    AgentErrorEvent,
+    AgentCompleteEvent,
+    AgentSSEEvent,
+    AgentChatRequest,
+)
 
 __all__ = [
     "PaginationParams",
@@ -65,4 +77,14 @@ __all__ = [
     "AIHealthResponse",
     "ChatMessage",
     "ChatCompletionRequest",
+    "AgentEventType",
+    "AgentStatusEvent",
+    "ToolStartEvent",
+    "ToolResultEvent",
+    "MessageDeltaEvent",
+    "ApprovalRequiredEvent",
+    "AgentErrorEvent",
+    "AgentCompleteEvent",
+    "AgentSSEEvent",
+    "AgentChatRequest",
 ]

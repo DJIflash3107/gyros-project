@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     AMD_STREAM_CHUNK_TIMEOUT: int = 600
     AMD_MAX_RETRIES: int = 3
 
+    # Agent Configuration
+    AGENT_MAX_TURNS: int = 10
+    AGENT_REQUEST_TIMEOUT: int = 120
+    AGENT_MAX_TOKENS: int = 4096
+    AGENT_TEMPERATURE: float = 0.3
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

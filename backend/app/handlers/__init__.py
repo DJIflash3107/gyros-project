@@ -14,6 +14,7 @@ from app.handlers import (
     product_cost_history_handler,
     product_price_history_handler,
     ai_handler,
+    agent_handler,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "product_cost_history_handler",
     "product_price_history_handler",
     "ai_handler",
+    "agent_handler",
 ]

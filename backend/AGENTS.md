@@ -27,6 +27,7 @@ Read it fully before modifying any code.
 18. [Coding Conventions](#18-coding-conventions)
 19. [Adding a New Entity (Checklist)](#19-adding-a-new-entity-checklist)
 20. [AI Integration (AMD Token Factory)](#20-ai-integration-amd-token-factory)
+21. [Business Operations Agent (LangGraph)](#21-business-operations-agent-langgraph)
 
 ---
 
@@ -52,6 +53,8 @@ All endpoints live under the `/api/v1/` prefix.
 | Auth tokens | PyJWT (`HS256`) |
 | Password hashing | `bcrypt` |
 | Migrations | Alembic |
+| Agent & LLM orchestration | LangGraph 0.4+, LangChain Core 0.3+, LangChain OpenAI 0.3+ |
+| LLM Gateway / Provider | AMD Token Factory (OpenAI-compatible) |
 | Testing | `pytest` + `pytest-asyncio`, `httpx` via `TestClient` |
 | Python version | 3.11+ |
 
@@ -64,12 +67,18 @@ All endpoints live under the `/api/v1/` prefix.
 ```
 backend/
 ├── app/
+│   ├── agent/                # Business Operations Agent (LangGraph)
+│   │   ├── graph.py          # StateGraph workflow, nodes, conditional edges
+│   │   ├── prompts.py        # System prompt guardrails & response sanitizer
+│   │   ├── state.py          # AgentState TypedDict definition
+│   │   └── tools.py          # 8 read-only operational tools & LangChain bindings
 │   ├── configs/
 │   │   ├── amd_client.py     # AMD Token Factory client (retries, backoff, streaming)
 │   │   ├── database.py       # Engine, Base, SessionLocal, get_db()
 │   │   ├── security.py       # hash_password, verify_password, create/decode_access_token
 │   │   └── settings.py       # Pydantic Settings class (reads from .env)
 │   ├── handlers/
+│   │   ├── agent_handler.py      # Agent streaming chat handler (SSE StreamingResponse)
 │   │   ├── ai_handler.py         # AI endpoints handler (models, health, completions)
 │   │   └── <entity>_handler.py   # HTTP-layer functions (request → response)
 │   ├── helpers/
@@ -79,19 +88,23 @@ backend/
 │   │   ├── pagination.py     # paginate() helper
 │   │   └── response.py       # success_response, error_response, paginated_response
 │   ├── middlewares/
+│   │   ├── auth.py               # get_current_user & require_business_membership
 │   │   └── request_context.py    # RequestContextMiddleware (injects request_id)
 │   ├── models/
 │   │   ├── __init__.py       # Imports all ORM models so Alembic can discover them
 │   │   ├── types.py          # BigIntId, IntUnsigned — dialect-aware column types
 │   │   ├── <entity>.py       # One file per SQLAlchemy model
 │   │   └── schemas/
+│   │       ├── agent.py      # Pydantic schemas for SSE events and chat request
 │   │       ├── ai.py         # Pydantic schemas for AI models, health, and chat
 │   │       └── <entity>.py   # Pydantic schemas for that entity
 │   ├── routes/
-│   │   ├── __init__.py       # Re-exports all routers (including ai_router)
+│   │   ├── __init__.py       # Re-exports all routers (including agent_router, ai_router)
+│   │   ├── agent_routes.py   # /api/v1/agent routes (POST chat)
 │   │   ├── ai_routes.py      # /api/v1/ai routes (models, health, chat)
 │   │   └── <entity>_routes.py    # APIRouter + path declarations
 │   ├── services/
+│   │   ├── agent_service.py  # LangGraph astream_events orchestration & SSE streaming
 │   │   ├── ai_service.py     # AI discovery, capability inference, chat logic
 │   │   └── <entity>_service.py   # Business logic and DB interaction
 │   └── main.py               # FastAPI app, lifespan, middleware, exception handlers, router mounts
@@ -99,7 +112,11 @@ backend/
 │   ├── env.py                # Alembic environment (imports Base from configs.database)
 │   └── versions/             # Migration scripts
 ├── tests/
-│   ├── conftest.py           # In-memory SQLite fixtures (app, client, db)
+│   ├── conftest.py           # In-memory SQLite fixtures (app, client, db, auth_user, second_user)
+│   ├── test_agent_auth.py    # Agent auth & cross-tenant isolation tests
+│   ├── test_agent_graph.py   # LangGraph state & graph unit tests
+│   ├── test_agent_streaming.py # SSE streaming, deltas, timeouts, disconnects
+│   ├── test_agent_tools.py   # Read-only tools, zero writes, tenant filter tests
 │   ├── test_ai_endpoints.py  # Tests for /api/v1/ai routes
 │   ├── test_amd_client.py    # Tests for AMDTokenFactoryClient
 │   └── test_*.py             # Feature-grouped test files
@@ -162,6 +179,12 @@ AMD_DEFAULT_MODEL=DeepSeek-V4-Flash
 AMD_REQUEST_TIMEOUT=600          # 10 min, per AMD docs
 AMD_STREAM_CHUNK_TIMEOUT=600     # 10 min max gap between stream chunks
 AMD_MAX_RETRIES=3                # Retries on 429/502/503 with backoff + jitter
+
+# Agent Configuration (LangGraph)
+AGENT_MAX_TURNS=10               # Max tool round-trips per conversation turn
+AGENT_REQUEST_TIMEOUT=120        # Max total execution time in seconds
+AGENT_MAX_TOKENS=4096            # Max generation tokens per response
+AGENT_TEMPERATURE=0.3            # Conservative temperature for business ops
 ```
 
 Import via:
@@ -417,6 +440,8 @@ All custom exceptions inherit from `AppException` (`app/helpers/exceptions.py`).
 | `AIServiceException` | 502 | `ERR-AI-500` |
 | `AIRateLimitException` | 429 | `ERR-AI-429` |
 | `AIConfigException` | 503 | `ERR-AI-501` |
+| `AgentTimeoutException` | 408 | `ERR-AGT-408` |
+| `AgentCancelledException` | 499 | `ERR-AGT-499` |
 
 Handlers in `main.py` catch `AppException`, `RequestValidationError`, `StarletteHTTPException`,
 and bare `Exception` (fallback). **Do not** add new `@app.exception_handler` unless adding a new
@@ -499,6 +524,13 @@ Each log line automatically includes the `request_id` (correlation ID) set by
     - `ERR-AI-500`: AMD provider / gateway 5xx error
     - `ERR-AI-501`: AI service not configured (`AMD_API_KEY` missing)
     - `ERR-AI-503`: AMD connection failure or timeout
+  - Business Operations Agent:
+    - `ERR-AGT-400`: Bad agent request / invalid payload
+    - `ERR-AGT-408`: Agent request timeout exceeded
+    - `ERR-AGT-429`: Agent rate limit exceeded during tool execution
+    - `ERR-AGT-499`: Client disconnected during processing
+    - `ERR-AGT-500`: Internal agent / graph error
+    - `ERR-AGT-503`: Agent service unavailable (unconfigured key or LLM down)
 - `generate_error_code()` produces random `ERR-XXXXX` codes for unexpected errors.
 - Set `error_code_var` when you want the code to appear in the log line:
 
@@ -563,10 +595,24 @@ pytest -v
 
 | Fixture | Scope | Description |
 |---|---|---|
-| `engine` | function | Creates a fresh SQLite in-memory engine |
-| `tables` | function | Runs `Base.metadata.create_all` / `drop_all` per test |
-| `db` | function | Yields a Session against the test engine |
-| `client` | function | `TestClient` with `get_db` overridden to use test session |
+| `clean_database` | autouse | Runs `Base.metadata.create_all` / `drop_all` around each test |
+| `db_session` | function | Yields a Session against the in-memory SQLite engine |
+| `client` | function | `TestClient` with `get_db` overridden to use `db_session` |
+| `auth_user` | function | Registers and logs in primary user, returns user dict and `Authorization` header |
+| `second_user` | function | Registers and logs in second user for multi-tenant isolation tests |
+
+### Test Commands
+
+```bash
+# Run all tests
+pytest
+
+# Run agent tests
+pytest tests/test_agent_auth.py tests/test_agent_tools.py tests/test_agent_graph.py tests/test_agent_streaming.py -v
+
+# Run AI provider tests
+pytest tests/test_amd_client.py tests/test_ai_endpoints.py -v
+```
 
 ### Rules
 
@@ -701,5 +747,102 @@ The provider-specific transport and error handling are strictly isolated in `amd
 .venv/Scripts/python -m pytest tests/test_amd_client.py tests/test_ai_endpoints.py -v
 
 # Run full test suite
+.venv/Scripts/python -m pytest -v
+```
+
+---
+
+## 21. Business Operations Agent (LangGraph)
+
+Phase 2 builds an agentic Business Operations assistant using **LangGraph** and the **AMD Token Factory** provider from Phase 1. The agent delivers real-time streaming conversational assistance over Server-Sent Events (SSE) while enforcing strict read-only constraints, tenant isolation, and security guardrails.
+
+### Architecture
+
+```
+Client (POST /api/v1/agent/businesses/{business_id}/chat)
+  │
+  ▼
+agent_routes.py ─────────────────────────── JWT auth + business membership
+  │
+  ▼
+agent_handler.py ────────────────────────── StreamingResponse with text/event-stream
+  │
+  ▼
+agent_service.py ────────────────────────── graph.astream_events() + SSE event mapper
+  │
+  ▼
+agent_graph.py ──────────────────────────── LangGraph StateGraph
+  ├── route_request_node ────────────────── Analyzes intent, tool calling
+  ├── execute_tools_node ────────────────── Calls read-only tools asynchronously
+  ├── generate_response_node ────────────── LLM final synthesis (token-by-token stream)
+  └── handle_error_node ────────────────── Catches errors → safe agent_error event
+  │
+  ▼
+agent_tools.py ──────────────────────────── Read-only operational tool functions
+  ├── business_summary ──────────────────── Aggregates business metadata and branches
+  ├── sales_analytics ───────────────────── Aggregates sales observations and revenue
+  ├── expense_summary ───────────────────── Aggregates expenses by category
+  ├── product_catalog ───────────────────── Queries product catalog and status
+  ├── invoke_forecasting ────────────────── Stub (future forecasting service)
+  ├── invoke_action_center ──────────────── Stub (future Business Action Center)
+  ├── invoke_promotion_planner ──────────── Stub (future Promotion Planner)
+  └── invoke_artifact_service ───────────── Stub (future artifact generator)
+```
+
+### Components
+
+| File | Layer | Purpose |
+|---|---|---|
+| `app/models/schemas/agent.py` | Schema | Pydantic schemas: `AgentSSEEvent`, `AgentChatRequest`, event data models (`AgentStatusEvent`, `ToolStartEvent`, `ToolResultEvent`, `MessageDeltaEvent`, `ApprovalRequiredEvent`, `AgentErrorEvent`, `AgentCompleteEvent`). |
+| `app/agent/state.py` | Agent | `AgentState` TypedDict for LangGraph state management. |
+| `app/agent/prompts.py` | Agent | System prompt template and `sanitize_response()` to strip chain-of-thought `<think>` blocks. |
+| `app/agent/tools.py` | Agent | Read-only tool execution functions and LangChain `BaseTool` wrappers. |
+| `app/agent/graph.py` | Agent | `StateGraph` workflow, nodes (`route_request`, `execute_tools`, `generate_response`, `handle_error`), and conditional edges (`should_use_tools`, `check_continue`). |
+| `app/services/agent_service.py` | Service | Graph execution via `astream_events(version="v2")`, event mapping to `AgentSSEEvent`, timeouts, and client disconnect handling. |
+| `app/handlers/agent_handler.py` | Handler | `agent_chat_handler` returning `StreamingResponse` with `text/event-stream`. |
+| `app/routes/agent_routes.py` | Route | `APIRouter` at `/api/v1/agent/businesses/{business_id}/chat`. |
+
+### Endpoints
+
+| Method | Path | Auth / Authz | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/agent/businesses/{business_id}/chat` | JWT + Business Membership | Streams structured SSE events for agent conversation. |
+
+### SSE Stream Event Protocol
+
+Events are streamed as `data: {json}\n\n` followed by a terminal `data: [DONE]\n\n`:
+
+1. `agent_status` — Graph lifecycle status (`routing`, `executing_tools`, `generating_response`).
+2. `tool_start` — Emitted when a tool begins execution with sanitized input.
+3. `tool_result` — Emitted when a tool completes with summary and aggregated data.
+4. `message_delta` — Incremental tokens from the LLM final synthesis.
+5. `approval_required` — Reserved for future action authorization workflows.
+6. `agent_error` — Emitted on failure with standardized error code (e.g., `ERR-AGT-408`, `ERR-AGT-500`).
+7. `agent_complete` — Terminal event with `tools_used`, `duration_ms`, and `total_tokens`.
+
+### Security Guardrails
+
+1. **Read-Only Enforcement:** Agent tools NEVER execute `INSERT`, `UPDATE`, `DELETE`, or raw SQL (`db.execute(text(...))`). All data queries use existing ORM service functions.
+2. **Strict Multi-Tenant Isolation:** The `business_id` is extracted from the URL and enforced via `require_business_membership()`. All tool queries strictly filter by the authorized `business_id`.
+3. **Chain-of-Thought Sanitization:** `<think>` and `reasoning` blocks are stripped by `sanitize_response()` and never streamed in `message_delta` events.
+4. **No Internal Leakage:** Database table names, SQL queries, credentials, and Python stack traces are never exposed to the client or LLM.
+5. **Timeouts and Cancellation:** Configurable timeout via `AGENT_REQUEST_TIMEOUT` (emits `ERR-AGT-408`). Client disconnects (`Request.is_disconnected()`) abort the generator gracefully.
+
+### Configuration (`.env`)
+
+```ini
+AGENT_MAX_TURNS=10
+AGENT_REQUEST_TIMEOUT=120
+AGENT_MAX_TOKENS=4096
+AGENT_TEMPERATURE=0.3
+```
+
+### Testing Commands
+
+```bash
+# Run agent test suites
+.venv/Scripts/python -m pytest tests/test_agent_auth.py tests/test_agent_tools.py tests/test_agent_graph.py tests/test_agent_streaming.py -v
+
+# Run full project test suite
 .venv/Scripts/python -m pytest -v
 ```

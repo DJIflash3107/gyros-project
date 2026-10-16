@@ -14,6 +14,7 @@ from app.services import (
     product_cost_history_service,
     product_price_history_service,
     ai_service,
+    agent_service,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "product_cost_history_service",
     "product_price_history_service",
     "ai_service",
+    "agent_service",
 ]
