@@ -26,6 +26,7 @@ Read it fully before modifying any code.
 17. [Testing](#17-testing)
 18. [Coding Conventions](#18-coding-conventions)
 19. [Adding a New Entity (Checklist)](#19-adding-a-new-entity-checklist)
+20. [AI Integration (AMD Token Factory)](#20-ai-integration-amd-token-factory)
 
 ---
 
@@ -64,14 +65,16 @@ All endpoints live under the `/api/v1/` prefix.
 backend/
 ├── app/
 │   ├── configs/
+│   │   ├── amd_client.py     # AMD Token Factory client (retries, backoff, streaming)
 │   │   ├── database.py       # Engine, Base, SessionLocal, get_db()
 │   │   ├── security.py       # hash_password, verify_password, create/decode_access_token
 │   │   └── settings.py       # Pydantic Settings class (reads from .env)
 │   ├── handlers/
+│   │   ├── ai_handler.py         # AI endpoints handler (models, health, completions)
 │   │   └── <entity>_handler.py   # HTTP-layer functions (request → response)
 │   ├── helpers/
 │   │   ├── error_codes.py    # ErrorCodeRegistry + generate_error_code()
-│   │   ├── exceptions.py     # AppException hierarchy
+│   │   ├── exceptions.py     # AppException hierarchy (includes AIServiceException, etc.)
 │   │   ├── logging.py        # setup_logging(), logger, request_id_var, error_code_var
 │   │   ├── pagination.py     # paginate() helper
 │   │   └── response.py       # success_response, error_response, paginated_response
@@ -82,18 +85,23 @@ backend/
 │   │   ├── types.py          # BigIntId, IntUnsigned — dialect-aware column types
 │   │   ├── <entity>.py       # One file per SQLAlchemy model
 │   │   └── schemas/
+│   │       ├── ai.py         # Pydantic schemas for AI models, health, and chat
 │   │       └── <entity>.py   # Pydantic schemas for that entity
 │   ├── routes/
-│   │   ├── __init__.py       # Re-exports all routers
+│   │   ├── __init__.py       # Re-exports all routers (including ai_router)
+│   │   ├── ai_routes.py      # /api/v1/ai routes (models, health, chat)
 │   │   └── <entity>_routes.py    # APIRouter + path declarations
 │   ├── services/
+│   │   ├── ai_service.py     # AI discovery, capability inference, chat logic
 │   │   └── <entity>_service.py   # Business logic and DB interaction
-│   └── main.py               # FastAPI app, middleware, exception handlers, router mounts
+│   └── main.py               # FastAPI app, lifespan, middleware, exception handlers, router mounts
 ├── alembic/
 │   ├── env.py                # Alembic environment (imports Base from configs.database)
 │   └── versions/             # Migration scripts
 ├── tests/
 │   ├── conftest.py           # In-memory SQLite fixtures (app, client, db)
+│   ├── test_ai_endpoints.py  # Tests for /api/v1/ai routes
+│   ├── test_amd_client.py    # Tests for AMDTokenFactoryClient
 │   └── test_*.py             # Feature-grouped test files
 ├── .env                      # Local secrets (git-ignored)
 ├── .env.example              # Template for .env
@@ -146,6 +154,14 @@ APP_NAME=GyrosProject
 APP_ENV=development
 APP_DEBUG=true
 LOG_LEVEL=INFO
+
+# AMD Token Factory Configuration
+AMD_API_BASE_URL=https://developer.amd.com.cn/radeon/api/v1
+AMD_API_KEY=rc-...               # Required for AI features
+AMD_DEFAULT_MODEL=DeepSeek-V4-Flash
+AMD_REQUEST_TIMEOUT=600          # 10 min, per AMD docs
+AMD_STREAM_CHUNK_TIMEOUT=600     # 10 min max gap between stream chunks
+AMD_MAX_RETRIES=3                # Retries on 429/502/503 with backoff + jitter
 ```
 
 Import via:
@@ -155,6 +171,7 @@ from app.configs.settings import settings
 ```
 
 > Never hardcode secrets. Always read from `settings`.
+> When `AMD_API_KEY` is empty, the server starts normally but AI endpoints return standardized 503 (`ERR-AI-501`).
 
 ---
 
@@ -397,6 +414,9 @@ All custom exceptions inherit from `AppException` (`app/helpers/exceptions.py`).
 | `NotFoundException` | 404 | `ERR-40004` |
 | `ConflictException` | 409 | `ERR-40009` |
 | `InternalException` | 500 | random `ERR-XXXXX` |
+| `AIServiceException` | 502 | `ERR-AI-500` |
+| `AIRateLimitException` | 429 | `ERR-AI-429` |
+| `AIConfigException` | 503 | `ERR-AI-501` |
 
 Handlers in `main.py` catch `AppException`, `RequestValidationError`, `StarletteHTTPException`,
 and bare `Exception` (fallback). **Do not** add new `@app.exception_handler` unless adding a new
@@ -469,7 +489,16 @@ Each log line automatically includes the `request_id` (correlation ID) set by
 
 ### Error codes
 
-- `ErrorCodeRegistry` contains named static codes for known error conditions.
+- `ErrorCodeRegistry` contains named static codes for known error conditions:
+  - Standard errors: `ERR-40001` (Auth failed), `ERR-40003` (Forbidden), `ERR-40004` (Not found), `ERR-40009` (Conflict), `ERR-42200` (Validation failed), `ERR-50000` (Internal), `ERR-60001` (DB error).
+  - AI / AMD Token Factory:
+    - `ERR-AI-400`: Invalid parameter / model rejected by AMD gateway
+    - `ERR-AI-401`: Missing or invalid AMD API key
+    - `ERR-AI-403`: AMD account review pending / forbidden
+    - `ERR-AI-429`: AMD rate limit exceeded (after retries exhausted)
+    - `ERR-AI-500`: AMD provider / gateway 5xx error
+    - `ERR-AI-501`: AI service not configured (`AMD_API_KEY` missing)
+    - `ERR-AI-503`: AMD connection failure or timeout
 - `generate_error_code()` produces random `ERR-XXXXX` codes for unexpected errors.
 - Set `error_code_var` when you want the code to appear in the log line:
 
@@ -605,3 +634,72 @@ Follow this order to add a new resource. Replace `<entity>` with the new entity 
 - [ ] **Mount route**: Import and call `app.include_router(...)` in `app/main.py`.
 - [ ] **Migration**: Run `alembic revision --autogenerate -m "add_<entity>_table"` and review the generated file.
 - [ ] **Tests**: Create `tests/test_<entity>.py` covering creation, retrieval, update, deletion, and error cases.
+
+---
+
+## 20. AI Integration (AMD Token Factory)
+
+The backend integrates AMD Radeon Cloud Token Factory for free, OpenAI-compatible LLM endpoints.
+
+### Architecture
+
+```
+Client
+  │
+  ▼
+ai_routes.py (/api/v1/ai)
+  │
+  ▼
+ai_handler.py (builds success_response / StreamingResponse)
+  │
+  ▼
+ai_service.py (capability inference, health check, chat orchestration)
+  │
+  ▼
+amd_client.py (httpx.AsyncClient + backoff retry + error parser)
+  │
+  ▼
+AMD Gateway (https://developer.amd.com.cn/radeon/api/v1)
+```
+
+### Components
+
+| File | Layer | Purpose |
+|---|---|---|
+| `app/configs/amd_client.py` | Config / Client | Low-level HTTP client (`AMDTokenFactoryClient`), retry with backoff + jitter for 429/502/503, dual error parser, SSE stream generator. |
+| `app/services/ai_service.py` | Service | Business logic: `list_models()`, `check_health()`, `chat_completion()`, `chat_completion_stream()`. Enforces **no placeholder output on failure**. |
+| `app/handlers/ai_handler.py` | Handler | Formats responses using `success_response()` and `StreamingResponse` for SSE. |
+| `app/routes/ai_routes.py` | Route | APIRouter prefixed at `/api/v1/ai`. |
+| `app/models/schemas/ai.py` | Schema | Pydantic schemas: `AIModelInfo`, `AIHealthResponse`, `ChatMessage`, `ChatCompletionRequest`. |
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/ai/models` | Discover models at runtime with capability flags (`supports_vision`, `supports_reasoning`, `supports_tools`). |
+| `GET` | `/api/v1/ai/health` | Operational health check (returns `unconfigured`, `healthy`, or `unavailable` with latency and usage). |
+| `POST` | `/api/v1/ai/chat/completions` | Chat completions. If `stream: true`, streams SSE tokens ending with `data: [DONE]`. |
+
+### Gateway & Model Rules
+
+1. **Parameters accepted by AMD Gateway:** `model`, `messages`, `stream`, `temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `response_format`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`.
+2. **Silently dropped:** `stop`, `seed`, `logit_bias`, `logprobs`, `top_k`, `min_p`, `repetition_penalty`.
+3. **Rejected with 400:** `thinking: {...}` and `reasoning.enabled` (use `reasoning_effort` instead).
+4. **Timeouts:** 10 minutes (600s) default request timeout; 10 minutes max gap between streaming chunks.
+5. **Rate limits:** Per-key 30 RPM, 8 concurrent requests. Shared across the entire team key.
+6. **Graceful startup:** If `AMD_API_KEY` is not set, the server starts normally; AI discovery/chat endpoints return standardized 503 (`ERR-AI-501`), and `/api/v1/ai/health` returns `status: "unconfigured"`.
+7. **No placeholder output:** If an AI request fails, always raise the mapped `AppException` subclass. Never mock or return fallback placeholder text to the caller.
+
+### LangGraph Integration Readiness
+
+The provider-specific transport and error handling are strictly isolated in `amd_client.py`. Downstream agents or LangGraph workflows can bind to `ai_service` or wrap `get_amd_client()` cleanly without protocol pollution.
+
+### Testing Commands
+
+```bash
+# Run AI unit and integration tests
+.venv/Scripts/python -m pytest tests/test_amd_client.py tests/test_ai_endpoints.py -v
+
+# Run full test suite
+.venv/Scripts/python -m pytest -v
+```

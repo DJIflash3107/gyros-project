@@ -12,6 +12,7 @@ from app.routes.import_issue_routes import router as import_issue_router
 from app.routes.expense_routes import router as expense_router
 from app.routes.product_cost_history_routes import router as product_cost_history_router
 from app.routes.product_price_history_routes import router as product_price_history_router
+from app.routes.ai_routes import router as ai_router
 
 __all__ = [
     "auth_router",
@@ -28,4 +29,5 @@ __all__ = [
     "expense_router",
     "product_cost_history_router",
     "product_price_history_router",
+    "ai_router",
 ]

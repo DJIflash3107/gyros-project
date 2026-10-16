@@ -13,6 +13,7 @@ from app.models.schemas.import_issue import ImportIssueCreate, ImportIssueUpdate
 from app.models.schemas.expense import ExpenseCreate, ExpenseUpdate, ExpenseResponse
 from app.models.schemas.product_cost_history import ProductCostHistoryCreate, ProductCostHistoryUpdate, ProductCostHistoryResponse
 from app.models.schemas.product_price_history import ProductPriceHistoryCreate, ProductPriceHistoryUpdate, ProductPriceHistoryResponse
+from app.models.schemas.ai import AIModelInfo, AIHealthResponse, ChatMessage, ChatCompletionRequest
 
 __all__ = [
     "PaginationParams",
@@ -60,4 +61,8 @@ __all__ = [
     "ProductPriceHistoryCreate",
     "ProductPriceHistoryUpdate",
     "ProductPriceHistoryResponse",
+    "AIModelInfo",
+    "AIHealthResponse",
+    "ChatMessage",
+    "ChatCompletionRequest",
 ]

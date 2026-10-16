@@ -13,6 +13,7 @@ from app.handlers import (
     expense_handler,
     product_cost_history_handler,
     product_price_history_handler,
+    ai_handler,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "expense_handler",
     "product_cost_history_handler",
     "product_price_history_handler",
+    "ai_handler",
 ]

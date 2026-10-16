@@ -25,14 +25,25 @@ from app.routes import (
     expense_router,
     product_cost_history_router,
     product_price_history_router,
+    ai_router,
 )
+from contextlib import asynccontextmanager
+from app.configs.amd_client import close_amd_client
 
 # Initialize structured logging
 setup_logging(settings.LOG_LEVEL)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await close_amd_client()
+
+
 app = FastAPI(
     title=settings.APP_NAME,
     debug=settings.APP_DEBUG,
+    lifespan=lifespan,
 )
 
 # Middleware
@@ -119,3 +130,4 @@ app.include_router(import_issue_router)
 app.include_router(expense_router)
 app.include_router(product_cost_history_router)
 app.include_router(product_price_history_router)
+app.include_router(ai_router)

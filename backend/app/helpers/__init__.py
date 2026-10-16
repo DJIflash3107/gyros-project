@@ -7,6 +7,9 @@ from app.helpers.exceptions import (
     NotFoundException,
     ConflictException,
     InternalException,
+    AIServiceException,
+    AIRateLimitException,
+    AIConfigException,
 )
 from app.helpers.response import success_response, paginated_response, error_response
 from app.helpers.logging import setup_logging, logger, request_id_var, error_code_var
@@ -21,6 +24,9 @@ __all__ = [
     "NotFoundException",
     "ConflictException",
     "InternalException",
+    "AIServiceException",
+    "AIRateLimitException",
+    "AIConfigException",
     "success_response",
     "paginated_response",
     "error_response",

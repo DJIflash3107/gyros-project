@@ -87,3 +87,45 @@ class InternalException(AppException):
         if errors is None:
             errors = {"server": "An internal error occurred"}
         super().__init__(status_code=500, message=formatted_message, errors=errors, error_code=code)
+
+
+class AIServiceException(AppException):
+    def __init__(
+        self,
+        status_code: int = 502,
+        message: str = "AI service error",
+        errors: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = ErrorCodeRegistry.AI_PROVIDER_ERROR,
+    ):
+        if errors is None:
+            errors = {"ai": message}
+        super().__init__(status_code=status_code, message=message, errors=errors, error_code=error_code)
+
+
+class AIRateLimitException(AppException):
+    def __init__(
+        self,
+        message: str = "AI rate limit exceeded",
+        retry_after: Optional[int] = None,
+        errors: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = ErrorCodeRegistry.AI_RATE_LIMITED,
+    ):
+        if errors is None:
+            err_dict: Dict[str, Any] = {"ai": message}
+            if retry_after is not None:
+                err_dict["retry_after"] = retry_after
+            errors = err_dict
+        super().__init__(status_code=429, message=message, errors=errors, error_code=error_code)
+        self.retry_after = retry_after
+
+
+class AIConfigException(AppException):
+    def __init__(
+        self,
+        message: str = "AI service is not configured",
+        errors: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = ErrorCodeRegistry.AI_NOT_CONFIGURED,
+    ):
+        if errors is None:
+            errors = {"ai": message}
+        super().__init__(status_code=503, message=message, errors=errors, error_code=error_code)

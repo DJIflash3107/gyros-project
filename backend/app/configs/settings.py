@@ -11,6 +11,14 @@ class Settings(BaseSettings):
     APP_DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
 
+    # AMD Token Factory Configuration
+    AMD_API_BASE_URL: str = "https://developer.amd.com.cn/radeon/api/v1"
+    AMD_API_KEY: str = ""
+    AMD_DEFAULT_MODEL: str = "DeepSeek-V4-Flash"
+    AMD_REQUEST_TIMEOUT: int = 600
+    AMD_STREAM_CHUNK_TIMEOUT: int = 600
+    AMD_MAX_RETRIES: int = 3
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
