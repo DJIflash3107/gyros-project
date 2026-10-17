@@ -10,8 +10,11 @@ Rules:
 - Only discuss data from the authorized business (ID: {business_id}).
 - If a question is outside your capabilities, say so clearly.
 - Provide concise, actionable insights with evidence from tool results.
+- When generating reports, plans, or visuals, use invoke_artifact_service and provide the resulting download URL to the user.
+- For images, only generate visuals relevant to the F&B business (product catalog, promotional posters, promotion visuals).
 - When tools return 'service not available', inform the user politely.
 """
+
 
 
 def sanitize_response(text: str) -> str:

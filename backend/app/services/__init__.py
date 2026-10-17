@@ -11,6 +11,9 @@ from app.services import (
     sales_report_observation_service,
     import_issue_service,
     expense_service,
+    expense_import_service,
+    expense_spreadsheet_parser,
+    expense_photo_extractor,
     product_cost_history_service,
     product_price_history_service,
     ai_service,
@@ -22,6 +25,10 @@ from app.services import (
     promotion_engine,
     promotion_service,
     promotion_narrative_generator,
+    artifact_storage,
+    report_generator,
+    image_generator,
+    artifact_service,
 )
 
 __all__ = [
@@ -37,6 +44,9 @@ __all__ = [
     "sales_report_observation_service",
     "import_issue_service",
     "expense_service",
+    "expense_import_service",
+    "expense_spreadsheet_parser",
+    "expense_photo_extractor",
     "product_cost_history_service",
     "product_price_history_service",
     "ai_service",
@@ -48,6 +58,10 @@ __all__ = [
     "promotion_engine",
     "promotion_service",
     "promotion_narrative_generator",
+    "artifact_storage",
+    "report_generator",
+    "image_generator",
+    "artifact_service",
 ]
 
 

@@ -63,6 +63,8 @@ class ProcessingSummary(BaseModel):
     sheets_processed: List[str] = Field(default_factory=list)
     sheets_skipped: List[str] = Field(default_factory=list)
     sheets_ambiguous: List[str] = Field(default_factory=list)
+    expenses_extracted: int = 0
+    expenses_total_amount: Decimal = Decimal("0.00")
     auto_created_products: List[ProductDraftResponse] = Field(default_factory=list)
     auto_created_branches: List[BranchDraftResponse] = Field(default_factory=list)
 

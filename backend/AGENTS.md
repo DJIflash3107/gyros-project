@@ -34,6 +34,8 @@ Read it fully before modifying any code.
 25. [Demand Forecasting Service](#25-demand-forecasting-service)
 26. [Business Action Center](#26-business-action-center)
 27. [AI-Assisted Promotion Planner](#27-ai-assisted-promotion-planner)
+28. [Artifact & Business File Generation Service](#28-artifact--business-file-generation-service)
+29. [Expense Import via Excel & Photo OCR](#29-expense-import-via-excel--photo-ocr)
 
 ---
 
@@ -60,8 +62,9 @@ All endpoints live under the `/api/v1/` prefix.
 | Password hashing | `bcrypt` |
 | Migrations | Alembic |
 | Agent & LLM orchestration | LangGraph 0.4+, LangChain Core 0.3+, LangChain OpenAI 0.3+ |
-| LLM Gateway / Provider | AMD Token Factory (OpenAI-compatible, vision & chat) |
+| LLM Gateway / Provider | AMD Token Factory (OpenAI-compatible, vision & chat & image-gen) |
 | Spreadsheet parsing | `openpyxl` 3.1+ (Excel .xlsx), `csv` stdlib (CSV) |
+| Report / file export | `reportlab` 4.0+ (PDF), `openpyxl` (XLSX), `csv` stdlib |
 | Testing | `pytest` + `pytest-asyncio`, `httpx` via `TestClient` |
 | Python version | 3.11+ |
 
@@ -78,7 +81,7 @@ backend/
 │   │   ├── graph.py          # StateGraph workflow, nodes, conditional edges
 │   │   ├── prompts.py        # System prompt guardrails & response sanitizer
 │   │   ├── state.py          # AgentState TypedDict definition
-│   │   └── tools.py          # 8 read-only operational tools & LangChain bindings
+│   │   └── tools.py          # 9 read-only operational tools & LangChain bindings (incl. invoke_artifact_service)
 │   ├── configs/
 │   │   ├── amd_client.py     # AMD Token Factory client (retries, backoff, streaming)
 │   │   ├── database.py       # Engine, Base, SessionLocal, get_db()
@@ -87,6 +90,7 @@ backend/
 │   ├── handlers/
 │   │   ├── agent_handler.py                  # Agent streaming chat handler (SSE StreamingResponse)
 │   │   ├── ai_handler.py                     # AI endpoints handler (models, health, completions)
+│   │   ├── artifact_handler.py               # Artifact generate (report/image/plan), list, download & delete
 │   │   ├── business_action_handler.py        # Business action recommendation & status handlers
 │   │   ├── promotion_handler.py              # Promotion generation, list, detail, status & eval handlers
 │   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
@@ -108,6 +112,7 @@ backend/
 │   ├── models/
 │   │   ├── __init__.py       # Imports all ORM models so Alembic can discover them
 │   │   ├── types.py          # BigIntId, IntUnsigned — dialect-aware column types
+│   │   ├── artifact.py                  # Artifact records (type, format, status, storage path, tenant keys)
 │   │   ├── business_action.py           # Persisted recommendations and lifecycle status
 │   │   ├── promotion_plan.py            # Promotion proposals, financial metrics & lifecycle status
 │   │   ├── sales_report_submission.py   # Ingestion submissions (status, sha256, counters)
@@ -121,6 +126,7 @@ backend/
 │   ├── models/schemas/
 │   │   ├── agent.py                  # Pydantic schemas for SSE events and chat request
 │   │   ├── ai.py                     # Pydantic schemas for AI models, health, and chat
+│   │   ├── artifact.py               # GenerateReportRequest, GenerateImageRequest, ArtifactResponse, DownloadLink
 │   │   ├── business_action.py        # GenerateActionsRequest, UpdateActionStatus, Response
 │   │   ├── promotion.py              # GeneratePromotionRequest, PromotionPlanResponse, Evaluate
 │   │   ├── sales_report_processing.py # ManualFormBatchCreate, ProcessingResultResponse, SSE schemas
@@ -135,6 +141,7 @@ backend/
 │   │   ├── __init__.py                   # Re-exports all routers
 │   │   ├── agent_routes.py               # /api/v1/agent routes (POST chat)
 │   │   ├── ai_routes.py                  # /api/v1/ai routes (models, health, chat)
+│   │   ├── artifact_routes.py            # /api/v1/businesses/{id}/artifacts & /api/v1/artifacts (dual router)
 │   │   ├── business_action_routes.py     # /api/v1/businesses/{id}/business-actions & direct routes
 │   │   ├── promotion_routes.py           # /api/v1/businesses/{id}/promotions & direct routes
 │   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
@@ -148,11 +155,15 @@ backend/
 │   │   ├── action_narrative_generator.py     # Dynamic AI narrative generation (English prompts, JSON schema)
 │   │   ├── agent_service.py                  # LangGraph astream_events orchestration & SSE streaming
 │   │   ├── ai_service.py                     # AI discovery, capability inference, chat logic
+│   │   ├── artifact_service.py               # Artifact orchestration: DB persistence, storage, download tracking
+│   │   ├── artifact_storage.py               # File storage abstraction (local/S3), signed download token helpers
 │   │   ├── business_action_engine.py         # Pure deterministic recommendation engine (10 rules)
 │   │   ├── business_action_service.py        # BAC orchestration, deduplication, persistence & ephemeral mode
+│   │   ├── image_generator.py                # F&B image generation with model verification & prompt enhancement
 │   │   ├── promotion_engine.py               # Pure deterministic promotion math, scenarios & constraints
 │   │   ├── promotion_narrative_generator.py  # AI promotion copy, operational notes & risk generation
 │   │   ├── promotion_service.py              # Promotion planner orchestration, evaluation & persistence
+│   │   ├── report_generator.py               # CSV/XLSX/PDF report & plan export generation (6 report types)
 │   │   ├── sales_report_processing_service.py # Orchestrator: spreadsheet/photo/form -> staging
 │   │   ├── input_profiler.py                 # Structural profiler (headers, types, sample data, merged cells)
 │   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapping & sheet role classifier
@@ -164,6 +175,9 @@ backend/
 │   │   ├── sales_report_observation_service.py# Confirmed observations & overlap checks
 │   │   ├── forecasting_engine.py             # Predictive time-series models (SMA, EMA, Holt-Winters, Backtesting)
 │   │   ├── forecasting_service.py            # Forecasting orchestration, validation & DB persistence
+│   │   ├── expense_import_service.py         # Expense ingestion orchestrator, branch resolution, AI categorization
+│   │   ├── expense_photo_extractor.py        # Vision OCR extraction for expense receipts/invoices
+│   │   ├── expense_spreadsheet_parser.py     # Expense spreadsheet (.xlsx, .csv) parser with dynamic mapping
 │   │   ├── import_issue_service.py           # Issue persistence
 │   │   ├── product_alias_service.py          # Alias resolution
 │   │   └── <entity>_service.py               # Business logic and DB interaction
@@ -176,6 +190,8 @@ backend/
 │   ├── test_agent_*.py                   # Agent auth, graph, streaming, and tool suites
 │   ├── test_ai_endpoints.py              # Tests for /api/v1/ai routes
 │   ├── test_amd_client.py                # Tests for AMDTokenFactoryClient
+│   ├── test_artifact_service.py          # 31 tests: storage, reports, images, API routes, multi-tenant, downloads
+│   ├── test_expense_import.py            # 13 tests: expense parsing, OCR, AI mapping/categorization, batch workflow
 │   ├── test_sales_report_processing.py   # Multi-channel ingestion, validation, and confirmation tests
 │   ├── test_multi_sheet_processing.py    # Multi-sheet Excel workbook ingestion tests
 │   ├── test_sales_report_staging_row_bulk.py # Staging row bulk update tests
@@ -260,6 +276,19 @@ SEMANTIC_MAPPING_ENABLED=true    # Toggle LLM dynamic mapping
 SEMANTIC_MAPPING_MODEL=""        # Model for column mapping (empty = AMD_DEFAULT_MODEL)
 SEMANTIC_MAPPING_TEMPERATURE=0.0 # Deterministic schema mapping
 SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD=0.7 # Minimum confidence score threshold
+
+# Artifact & File Generation Service
+ARTIFACT_STORAGE_BACKEND=local   # "local" | "s3"
+ARTIFACT_LOCAL_STORAGE_PATH=./storage/artifacts
+ARTIFACT_MAX_FILE_SIZE_MB=50
+ARTIFACT_DOWNLOAD_TOKEN_EXPIRE_MINUTES=30
+ARTIFACT_CLEANUP_AFTER_DAYS=90
+
+# Image Generation Configuration
+IMAGE_GEN_API_KEY=               # Provider API key (separate from AMD_API_KEY)
+IMAGE_GEN_BASE_URL=              # OpenAI-compatible base URL for image provider
+IMAGE_GEN_MODEL=                 # Must be an explicit image-gen model; empty = disabled
+IMAGE_GEN_TIMEOUT=120
 ```
 
 Import via:
@@ -637,6 +666,20 @@ Each log line automatically includes the `request_id` (correlation ID) set by
     - `ERR-BAC-002`: Invalid status transition
     - `ERR-BAC-003`: Dismissal reason required when status='dismissed'
     - `ERR-BAC-004`: Invalid filter parameter
+  - Promotion Planner:
+    - `ERR-PRO-001`: Promotion plan not found
+    - `ERR-PRO-002`: No products found for the business
+    - `ERR-PRO-003`: Missing price/cost data (financially_validated=False)
+  - Artifact & File Generation Service:
+    - `ERR-ART-001`: Artifact record not found
+    - `ERR-ART-002`: Artifact generation failed (generic)
+    - `ERR-ART-003`: Image generation failed
+    - `ERR-ART-004`: Image model not configured or unsupported (vision/chat model rejected)
+    - `ERR-ART-005`: Image prompt safety violation (non-F&B or malicious prompt)
+    - `ERR-ART-006`: Storage write failure
+    - `ERR-ART-007`: Download token invalid or expired
+    - `ERR-ART-008`: Report type not supported
+    - `ERR-ART-009`: Export format not supported
 - `generate_error_code()` produces random `ERR-XXXXX` codes for unexpected errors.
 - Set `error_code_var` when you want the code to appear in the log line:
 
@@ -710,8 +753,11 @@ pytest -v
 ### Test Commands
 
 ```bash
-# Run all tests (141 tests)
+# Run all tests (257 tests)
 pytest
+
+# Run artifact service tests (storage, reports, images, API, multi-tenant isolation, downloads)
+pytest tests/test_artifact_service.py -v
 
 # Run sales report processing, multi-sheet, bulk update, and semantic mapping tests
 pytest tests/test_sales_report_processing.py tests/test_multi_sheet_processing.py tests/test_sales_report_staging_row_bulk.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
@@ -898,7 +944,7 @@ agent_tools.py ─────────────────────�
   ├── invoke_forecasting ────────────────── Generates statistical forecasts via forecasting_service
   ├── invoke_action_center ──────────────── Generates ranked operational recommendations via BAC
   ├── invoke_promotion_planner ──────────── Generates promotion proposals and financial evaluations via promotion_service
-  └── invoke_artifact_service ───────────── Stub (future artifact generator)
+  └── invoke_artifact_service ───────────── Generates reports (CSV/XLSX/PDF), exports plans, creates F&B images, and retrieves artifact download links via artifact_service
 ```
 
 ### Components
@@ -1210,9 +1256,22 @@ The semantic mapper targets a fixed canonical dictionary (`CANONICAL_FIELDS`):
 - Unit Price & Cost: `unit_price`, `unit_cost`
 - Ignored: `_skip` (non-sales metadata, row numbers, arbitrary notes)
 
+### Canonical Expense Field Schema
+
+The semantic mapper provides dedicated financial schema mapping (`CANONICAL_EXPENSE_FIELDS`) using LLM as the primary method (`map_expense_columns_with_llm`):
+- Date: `expense_date` (Tanggal, Date, Tgl Transaksi, Waktu)
+- Category: `category` (Kategori, Jenis Biaya, Pos Anggaran, Akun)
+- Description: `description` (Keterangan, Deskripsi, Uraian, Item, Rincian, Keperluan)
+- Amount: `amount` (Jumlah, Nominal, Total, Biaya, Pengeluaran, Debit, Tagihan)
+- Location: `branch_id` (Cabang, Branch, Outlet, Lokasi)
+- Currency: `currency` (IDR, Mata Uang, Currency)
+- Ignored: `_skip` (Row numbers, metadata, irrelevant notes)
+
+Additionally, `categorize_expenses_with_llm` provides AI-first semantic category classification for expense line items into standard accounting categories (`Ingredients`, `Packaging`, `Utilities`, `Salaries & Wages`, `Maintenance`, `Marketing`, `Rent & Facilities`, `Operations`, `Other`), with automatic heuristic keyword fallback (`normalize_category`).
+
 ### Deterministic Fallback Strategy
 
-1. **Graceful Fallback:** If `SEMANTIC_MAPPING_ENABLED=False`, `AMD_API_KEY` is not configured, or the LLM request times out/fails, the parser automatically falls back to the static `COLUMN_MAPPING` dictionary.
+1. **Graceful Fallback:** If `SEMANTIC_MAPPING_ENABLED=False`, `AMD_API_KEY` is not configured, or the LLM request times out/fails, the parser automatically falls back to static column mapping (`COLUMN_MAPPING` for sales, `CANONICAL_EXPENSE_HEADERS` for expenses).
 2. **Confidence Thresholding:** Columns mapped below `SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD` (default: `0.7`) emit `ERR-RPT-021` warning issues on staging rows for human operator review.
 3. **Auditability:** Every staging row persists the mapping metadata (`mapping_method`, `model`, `column_confidences`, `warnings`) inside `extraction_confidence_json`.
 
@@ -1235,7 +1294,7 @@ When users upload an Excel workbook (`.xlsx`), the import pipeline automatically
      - `sales`: Transactions, daily branch status, order quantities, sold quantities, leftover stocks, or revenue.
      - `reference`: Product masters, price lists, branch directories (retained to enrich business matching context).
      - `instructional`: Template guides, notes, legends (safely skipped).
-     - `expenses`: Costs, petty cash, purchase invoices (unsupported for sales observation, skipped).
+     - `expenses`: Costs, petty cash, purchase invoices, operating expenses (automatically parsed via `map_expense_columns_with_llm` and persisted into the business expense ledger).
      - `ambiguous`: Unrecognized layouts or non-standard structures (flagged for review with `ERR-RPT-023`).
    - If the LLM is unavailable or disabled, `build_fallback_sheet_classifications` provides deterministic keyword-based heuristics.
 
@@ -1540,5 +1599,219 @@ The Business Operations Agent (`app/agent/tools.py`) exposes `invoke_promotion_p
 | `GET` | `/api/v1/promotions/plans/{id}` | Member | Direct endpoint to retrieve promotion plan details. |
 | `PATCH` | `/api/v1/promotions/plans/{id}/status` | Owner / Admin / Manager | Direct endpoint to update plan status. |
 | `POST` | `/api/v1/promotions/plans/{id}/evaluate` | Owner / Admin / Manager | Direct endpoint to re-evaluate an existing plan. |
+
+---
+
+## 28. Artifact & Business File Generation Service
+
+The Artifact Service generates and manages business files (reports, plan exports, and promotional images) from validated database records. It replaces the former `invoke_artifact_service` stub in `app/agent/tools.py` with a fully functional implementation integrated into the agent, authenticated REST endpoints, configurable storage, and strict image generation guardrails.
+
+### Architecture & Data Flow
+
+```
+Client / Business Operations Agent (invoke_artifact_service)
+      │
+      ▼
+artifact_routes.py
+  ├── /api/v1/businesses/{business_id}/artifacts/   (scoped router, JWT + membership)
+  └── /api/v1/artifacts/                            (direct router, JWT + ownership)
+      │
+      ▼
+artifact_handler.py (Request unpacking & standardized response format)
+      │
+      ▼
+artifact_service.py (DB persistence, file generation, storage, metadata, download tracking)
+      │
+      ├──────────────────────────────┬───────────────────────────────┐
+      ▼                              ▼                               ▼
+report_generator.py           image_generator.py          artifact_storage.py
+(CSV / XLSX / PDF exports     (F&B image generation        (Local/S3 file storage,
+ for 6 report types +          with explicit model          signed JWT download
+ structured plan exports)      verification)               tokens, path traversal
+                                                            protection)
+```
+
+| Component | File | Responsibility |
+|---|---|---|
+| Storage | `app/services/artifact_storage.py` | `LocalStorageService`, `S3StorageService` (stub), `create_download_token`, `verify_download_token`. Path traversal protection, per-business directory partitioning, configurable file size caps. |
+| Report Generator | `app/services/report_generator.py` | Generates CSV, XLSX, and PDF files for 6 report types + plan exports. Uses `openpyxl` (XLSX) and `reportlab` (PDF). |
+| Image Generator | `app/services/image_generator.py` | `ImageGeneratorService` with strict model verification (dynamic `@property` access), F&B prompt enhancement, b64 and URL image handling, provider error mapping. |
+| Artifact Service | `app/services/artifact_service.py` | Central orchestrator: creates `Artifact` DB records, calls appropriate generator, saves to storage, enriches metadata, tracks download counts. |
+| Handler | `app/handlers/artifact_handler.py` | Async HTTP-layer handlers returning standard response envelopes or `StreamingResponse` for downloads. |
+| Routes | `app/routes/artifact_routes.py` | Dual routers: scoped at `/api/v1/businesses/{business_id}/artifacts/` (membership-gated) and direct at `/api/v1/artifacts/` (auth-gated). |
+| Model | `app/models/artifact.py` | `Artifact` SQLAlchemy model with tenant isolation, status enum, storage path, download count, and error tracking. |
+| Schemas | `app/models/schemas/artifact.py` | `GenerateReportRequest`, `GeneratePlanRequest`, `GenerateImageRequest`, `ArtifactResponse`, with strict F&B purpose validation and prompt safety validators. |
+
+### Report Types & Export Formats
+
+| Report Type | Available Formats | Data Source |
+|---|---|---|
+| `sales_summary` | CSV, XLSX, PDF | `SalesReportObservation` with date filters |
+| `financial_summary` | CSV, XLSX, PDF | `SalesReportObservation` + `Expense` joined by period |
+| `inventory_status` | CSV, XLSX, PDF | `SalesReportObservation` disposition columns (spoiled, damaged, leftover) |
+| `forecast_export` | CSV, XLSX, PDF | `ForecastRun` + `ForecastResult` latest run per product |
+| `promotion_summary` | CSV, XLSX, PDF | `PromotionPlan` with status filter |
+| `action_center_summary` | CSV, XLSX, PDF | `BusinessAction` with status filter |
+| Plan exports (any plan type) | CSV, XLSX, PDF | Formatted plan detail from persisted plan record |
+
+### Image Generation Safety Rules
+
+1. **Explicit Model Verification**: `ImageGeneratorService.model` uses `@property` for dynamic settings access. On each request it checks the configured `IMAGE_GEN_MODEL` is non-empty and queries the provider's `/models` endpoint to confirm the model has explicit `image_generation` capability. Vision/chat models (e.g. `gpt-4o`, `claude-3-opus`) are rejected with `ART_IMAGE_MODEL_UNSUPPORTED` before any image credit is consumed.
+
+2. **F&B Purpose Restriction**: Only 3 business-purpose values are accepted via the Pydantic schema validator:
+   - `product_catalog` — Menu or product display visuals
+   - `promotional_poster` — Marketing posters or banners
+   - `promotion_visual` — Discount offer or promo campaign visuals
+   - All other values or unrelated image requests are rejected at validation time (`ART_IMAGE_PROMPT_REJECTED`) before any API call.
+
+3. **Zero Placeholder Policy**: If generation fails for any reason (timeout, rate limit, content policy, model error), the `Artifact` record is set to `status="failed"` with a sanitized `error_message`. No empty, corrupt, or placeholder files are written to storage.
+
+4. **Prompt Enhancement**: Accepted prompts are enriched with professional food/restaurant styling guidance before being sent to the image provider.
+
+### Storage & Download Security
+
+- **Per-Business Partitioning**: All files stored under `{storage_root}/{business_id}/{uuid}_{sanitized_name}.{ext}`.
+- **Path Traversal Protection**: `_safe_path()` validates that all resolved paths stay within the configured storage root; any attempt to traverse outside raises immediately.
+- **Signed Download Tokens**: `create_download_token(artifact_id, business_id, expires_minutes)` issues HMAC-SHA256-signed JWTs. `verify_download_token()` validates signature, expiry, and `business_id` before allowing file access.
+- **Dual Download Auth**: Downloads accept either `Authorization: Bearer <user_jwt>` or `?token=<signed_download_token>` query parameter. Signed tokens enable secure time-limited sharing without exposing user credentials.
+
+### Endpoints Reference
+
+| Method | Path | Auth / Role | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/businesses/{b_id}/artifacts/reports/generate` | Owner / Admin / Manager | Generate CSV, XLSX, or PDF report from DB records. |
+| `POST` | `/api/v1/businesses/{b_id}/artifacts/plans/generate` | Owner / Admin / Manager | Export a structured plan (promotion or action-center) as CSV, XLSX, or PDF. |
+| `POST` | `/api/v1/businesses/{b_id}/artifacts/images/generate` | Owner / Admin / Manager | Generate an F&B business-purpose image (strict model verification + purpose filter). |
+| `GET` | `/api/v1/businesses/{b_id}/artifacts/` | Member | List artifacts with filters (`artifact_type`, `status`) and pagination. |
+| `GET` | `/api/v1/artifacts/{artifact_id}` | Owner | Get artifact detail, file metadata, download count, and status. |
+| `GET` | `/api/v1/artifacts/{artifact_id}/download` | Owner (Bearer or ?token=) | Download file with `Content-Disposition: attachment` and correct mime-type. |
+| `DELETE` | `/api/v1/artifacts/{artifact_id}` | Owner / Admin | Soft-delete DB record and remove storage file. |
+| *(Direct)* | `/api/v1/artifacts/reports/generate` | — | Direct equivalents of all business-scoped routes above. |
+
+### Configuration (`.env`)
+
+```ini
+ARTIFACT_STORAGE_BACKEND=local          # "local" (default) or "s3"
+ARTIFACT_LOCAL_STORAGE_PATH=./storage/artifacts
+ARTIFACT_MAX_FILE_SIZE_MB=50
+ARTIFACT_DOWNLOAD_TOKEN_EXPIRE_MINUTES=30
+ARTIFACT_CLEANUP_AFTER_DAYS=90
+
+IMAGE_GEN_API_KEY=<provider_api_key>
+IMAGE_GEN_BASE_URL=https://api.openai.com/v1
+IMAGE_GEN_MODEL=dall-e-3               # Must be a verified image-gen model
+IMAGE_GEN_TIMEOUT=120
+```
+
+> If `IMAGE_GEN_MODEL` is empty or set to a non-image-gen model, image generation requests are rejected with `ERR-ART-004` without touching any external provider.
+
+### Agent Tool Integration (`invoke_artifact_service`)
+
+`execute_invoke_artifact_service` in `app/agent/tools.py` dispatches by `action`:
+
+| `action` | Description |
+|---|---|
+| `generate_report` | Calls `ArtifactService.generate_report()` with `report_type` and `output_format`. |
+| `export_plan` | Calls `ArtifactService.generate_plan_artifact()` with `plan_type` and `plan_id`. |
+| `generate_image` | Calls `ArtifactService.generate_image()` with `purpose` and `prompt`. |
+| `list` | Returns a paginated list of artifacts for the business. |
+| `get` | Returns a specific artifact's detail and download link. |
+| *(no db)* | Returns `status: "not_available"` to maintain backward compatibility in unit tests. |
+
+### Testing Commands
+
+```bash
+# Run artifact service tests (31 tests)
+pytest tests/test_artifact_service.py -v
+
+# Run artifact service + agent tools tests (39 tests)
+pytest tests/test_artifact_service.py tests/test_agent_tools.py -v
+```
+
+---
+
+## 29. Expense Import via Excel & Photo OCR
+
+The Expense Import module enables automated batch importing and AI vision extraction of business expenses from spreadsheets (Excel, CSV) and physical receipts/invoices (photos), powered by AI dynamic semantic mapping and English category standardization.
+
+### Ingestion Channels
+
+1. **Dedicated Expense Import API (`POST /api/v1/businesses/{business_id}/expenses/import`)**:
+   - `input_method="spreadsheet"`: Parses `.xlsx`, `.xls`, or `.csv` files using `expense_spreadsheet_parser.py` and AI semantic mapping.
+   - `input_method="photo"`: Extracts receipt data using AMD Token Factory Vision model (`expense_photo_extractor.py`).
+   - `persist=False`: Dry-run extraction returning preview items (`data.items`) without writing to the database.
+   - `persist=True`: Immediately persists validated rows to the `expenses` table.
+
+2. **Multi-Sheet Workbook Integration (`sales_report_processing_service.py`)**:
+   - Automatically detects sheets with `role="expenses"` via `classify_sheet_roles()`.
+   - Uses `map_expense_columns_with_llm()` and `categorize_expenses_with_llm()` to parse expense rows.
+   - Saves parsed expenses with `source_submission_id = submission.id`.
+   - Populates `summary.expenses_extracted` and `summary.expenses_total_amount`.
+
+### AI Semantic Mapping & Categorization (Primary Strategy)
+
+1. **AI Dynamic Column Mapping (`map_expense_columns_with_llm`)**:
+   - Primary: Uses AMD Token Factory LLMs to map arbitrary raw English or Indonesian column headers to canonical expense fields:
+     `expense_date`, `category`, `description`, `amount`, `branch_name`, `currency`, `receipt_ref`.
+   - Fallback: `build_fallback_expense_mapping()` deterministic pattern matching on known aliases if AI services are disabled or offline.
+
+2. **AI Semantic Categorization (`categorize_expenses_with_llm`)**:
+   - Primary: Analyzes transaction descriptions in batches via LLM and assigns the most accurate category from the 9 standard categories.
+   - Fallback: `normalize_category()` keyword heuristic dictionary fallback if LLM is unreachable.
+
+### Standardized English Expense Categories
+
+All expense categories across models, schemas, AI prompts, and database records are strictly standardized to 9 clean English categories:
+- `Ingredients` — Food items, spices, produce, raw meat, beverages.
+- `Packaging` — Boxes, bags, cups, containers, tape, labels.
+- `Utilities` — Electricity (PLN), water (PDAM), gas (LPG), internet/Wi-Fi.
+- `Salaries & Wages` — Employee pay, overtime, chef/cook/waiter wages, contractor fees.
+- `Maintenance` — Equipment repairs, kitchen maintenance, plumbing, renovations.
+- `Marketing` — Ads (Meta, Google, TikTok), flyers, banners, social media promotions.
+- `Rent & Facilities` — Store rent, stall lease, facility fees, security, garbage collection.
+- `Operations` — POS subscription, transportation/delivery fees, cleaning supplies, POS printer paper.
+- `Other` — Miscellaneous expenses not fitting the above categories.
+
+### Two-Phase Preview $\rightarrow$ Edit $\rightarrow$ Batch Save Workflow
+
+To support workflows where an operator reviews parsed data before committing it to the database:
+
+```
+Step 1: Upload with persist=false
+Client ──► POST /expenses/import (persist=false)
+       ◄── 200 OK: data.items (Preview items, 0 DB records)
+
+Step 2: Client/UI Review & Inline Correction
+User / Frontend edits typo in description, adjusts category or amount in JSON
+
+Step 3: Save Corrected Batch Atomically
+Client ──► POST /expenses/batch ({"items": [corrected_items]})
+       ◄── 201 Created: { summary: { total_saved, total_amount }, expenses: [...] }
+```
+
+- **`POST /api/v1/businesses/{business_id}/expenses/batch`**:
+  - Request Body: `ExpenseBatchCreate` schema (`items: list[ExpenseCreate]`).
+  - Validation: Verifies business membership, validates that all referenced `branch_id`s belong to the target business, and checks non-negative amounts and valid dates.
+  - Atomicity: Performs all database inserts within a single database transaction. If any item is invalid, the entire batch fails without partial commits.
+
+### Core Components
+
+| Component | File | Responsibility |
+|---|---|---|
+| Semantic Mapper | `app/services/semantic_mapper.py` | `map_expense_columns_with_llm` and `categorize_expenses_with_llm` for dynamic AI schema mapping and category assignment. |
+| Spreadsheet Parser | `app/services/expense_spreadsheet_parser.py` | Parses `.xlsx` and `.csv` files using semantic column mapping, flexible date parsing, and Indonesian/English currency normalization. |
+| Vision OCR Extractor | `app/services/expense_photo_extractor.py` | Extracts merchant, transaction date, line items, and grand total from receipt/nota photos using AMD Vision AI into English categories. |
+| Import Service | `app/services/expense_import_service.py` | Orchestrates import workflow, invokes AI mapping and categorization, resolves default branches, and handles dry-run preview vs persistence. |
+| Expense Service | `app/services/expense_service.py` | Core CRUD operations and `create_expenses_batch()` for atomic multi-row persistence. |
+| Schemas | `app/models/schemas/expense.py` | `ExpenseCreate`, `ExpenseBatchCreate`, `ExpenseResponse`, `ExpenseBatchResponse`. |
+| Routes & Handlers | `app/routes/expense_routes.py`, `app/handlers/expense_handler.py` | `POST .../expenses/import` (multipart upload) and `POST .../expenses/batch` (JSON batch save). |
+
+### Testing Commands
+
+```bash
+# Run expense import unit and integration tests (13 tests)
+pytest tests/test_expense_import.py -v
+```
+
 
 

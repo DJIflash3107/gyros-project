@@ -33,7 +33,10 @@ from app.routes import (
     direct_business_action_router,
     promotion_router,
     direct_promotion_router,
+    artifact_router,
+    direct_artifact_router,
 )
+
 
 
 from contextlib import asynccontextmanager
@@ -147,4 +150,7 @@ app.include_router(business_action_router)
 app.include_router(direct_business_action_router)
 app.include_router(promotion_router)
 app.include_router(direct_promotion_router)
+app.include_router(artifact_router)
+app.include_router(direct_artifact_router)
+
 

@@ -1,6 +1,6 @@
 # Gyros Project — Backend API
 
-A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, an agentic **Business Operations Agent** built with **LangGraph**, a multi-sheet **Sales Report Processing & LLM Semantic Mapping** engine, a predictive **Demand Forecasting Service**, an intelligent **Business Action Center**, and an **AI-Assisted Promotion Planner**.
+A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, an agentic **Business Operations Agent** built with **LangGraph**, a multi-sheet **Sales Report Processing & LLM Semantic Mapping** engine, a predictive **Demand Forecasting Service**, an intelligent **Business Action Center**, an **AI-Assisted Promotion Planner**, and an **Artifact & Business File Generation Service**.
 
 ---
 
@@ -9,7 +9,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
 - **Multi-Tenant Architecture**: Strict tenancy isolation and role-based access control (`owner`, `admin`, `manager`, `member`, `viewer`).
 - **Standardized Response Envelope**: Uniform JSON response shape across all standard endpoints:
   - `{ "message": { "success": "..." }, "error": {}, "data": { ... } }`
-- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`, `ERR-FOR-001`, `ERR-BAC-001`, `ERR-PRO-001`) and correlated `request_id` context in every log record.
+- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`, `ERR-FOR-001`, `ERR-BAC-001`, `ERR-PRO-001`, `ERR-ART-001`) and correlated `request_id` context in every log record.
 - **AI-Assisted Promotion Planner**:
   - Deterministic financial evaluation engine calculating discount prices, estimated contribution, unit margins, and volume scenarios (conservative, base, aggressive) using backend math—strictly no LLM arithmetic.
   - Enforces configurable financial constraints, including minimum acceptable margin thresholds and budget caps.
@@ -53,8 +53,22 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Real-time conversational AI assistant powered by a LangGraph `StateGraph` workflow.
   - Genuine token-by-token and lifecycle streaming over Server-Sent Events (SSE) via `POST /api/v1/agent/businesses/{business_id}/chat`.
   - 7 structured SSE event types: `agent_status`, `tool_start`, `tool_result`, `message_delta`, `approval_required`, `agent_error`, `agent_complete`.
-  - Operational tools: `business_summary`, `sales_analytics`, `expense_summary`, `product_catalog`, `invoke_forecasting`, `invoke_action_center`, `invoke_promotion_planner`, plus stub for `invoke_artifact_service`.
+  - Operational tools: `business_summary`, `sales_analytics`, `expense_summary`, `product_catalog`, `invoke_forecasting`, `invoke_action_center`, `invoke_promotion_planner`, and `invoke_artifact_service` (full report & image generation).
   - Security guardrails: zero database writes, strict cross-tenant filtering by `business_id`, chain-of-thought `<think>` block sanitization, and request timeouts.
+- **Artifact & Business File Generation Service**:
+  - Generates business reports from validated database records in **CSV**, **XLSX** (openpyxl), and **PDF** (reportlab) formats across 6 report types: `sales_summary`, `financial_summary`, `inventory_status`, `forecast_export`, `promotion_summary`, and `action_center_summary`.
+  - Exports structured promotion or action-center plans as formatted PDF tables, XLSX workbooks, or CSV files.
+  - Generates F&B business-purpose images (`product_catalog`, `promotional_poster`, `promotion_visual`) through strict model verification — vision/chat models are explicitly rejected; only verified image generation models are invoked.
+  - Multi-tenant file storage under configurable backends (`local` or `s3`), with per-business directory partitioning and path traversal protection.
+  - Authenticated download endpoints supporting both Bearer JWT and short-lived HMAC-SHA256 signed download tokens (default 30 min expiry).
+  - Zero placeholder policy: no empty, corrupt, or partial files are written on any failure; failed attempts are recorded in the database with descriptive error messages.
+  - Fully integrated into the Business Operations Agent via the `invoke_artifact_service` tool.
+- **Expense Import & Batch Management**:
+  - Ingests business expenses from spreadsheets (`.xlsx`, `.csv`) and physical receipt/nota photos (AMD Vision OCR).
+  - **AI Dynamic Semantic Mapping as Primary**: Automatically maps arbitrary raw column headers to canonical expense fields using AMD Token Factory LLMs with robust deterministic fallback.
+  - **AI Semantic Categorization**: Batch-categorizes expense transaction descriptions into 9 standardized English categories with keyword fallback.
+  - **Standardized English Categories**: `Ingredients`, `Packaging`, `Utilities`, `Salaries & Wages`, `Maintenance`, `Marketing`, `Rent & Facilities`, `Operations`, `Other`.
+  - **Two-Phase Review & Batch Ingestion Workflow**: Dry-run preview (`persist=false`) allows client inspection and inline field correction in UI/JSON without saving to DB; corrected records are saved atomically in one transaction via `POST /api/v1/businesses/{id}/expenses/batch`.
 - **AMD Token Factory AI Integration**:
   - Runtime model discovery (`GET /api/v1/ai/models`) with capability flags (streaming, vision, reasoning, tool calling).
   - Operational health & quota check (`GET /api/v1/ai/health`).
@@ -63,7 +77,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Graceful degradation: server boots normally without API credentials.
   - Zero placeholder output policy: errors are raised explicitly and traceably.
 - **Database Migrations**: Managed schema versions using **Alembic**.
-- **Automated Testing**: 218 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
+- **Automated Testing**: 262 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
 
 ---
 
@@ -77,8 +91,9 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
 | **Database Migrations** | [Alembic](https://alembic.sqlalchemy.org/) |
 | **Authentication** | [PyJWT](https://pyjwt.readthedocs.io/) (HS256) + [bcrypt](https://pypi.org/project/bcrypt/) |
 | **Agent & Workflow Graph** | [LangGraph](https://langchain-ai.github.io/langgraph/) (0.4+) + [LangChain Core](https://python.langchain.com/) + [LangChain OpenAI](https://github.com/langchain-ai/langchain) |
-| **LLM Gateway / Provider** | [AMD Token Factory](https://developer.amd.com.cn/) (OpenAI-compatible, chat & vision) |
+| **LLM Gateway / Provider** | [AMD Token Factory](https://developer.amd.com.cn/) (OpenAI-compatible, chat & vision & image-gen) |
 | **Spreadsheet Ingestion** | [openpyxl](https://openpyxl.readthedocs.io/) (3.1+ for Excel `.xlsx`) + `csv` stdlib |
+| **Report / File Export** | [reportlab](https://www.reportlab.com/) (PDF), [openpyxl](https://openpyxl.readthedocs.io/) (XLSX), `csv` stdlib |
 | **HTTP Client / Streaming** | [HTTPX](https://www.python-httpx.org/) (Async client with connection pooling) |
 | **Testing** | [pytest](https://docs.pytest.org/) + `pytest-asyncio` |
 
@@ -93,7 +108,7 @@ backend/
 │   │   ├── graph.py          # StateGraph workflow, nodes, conditional edges
 │   │   ├── prompts.py        # System prompt guardrails & response sanitizer
 │   │   ├── state.py          # AgentState TypedDict definition
-│   │   └── tools.py          # 8 read-only operational tools & LangChain bindings
+│   │   └── tools.py          # 9 read-only operational tools & LangChain bindings (incl. artifact service)
 │   ├── configs/              # Settings, database connection, security, AMD HTTP client
 │   │   ├── amd_client.py     # AMD Token Factory client (retries, backoff, streaming)
 │   │   ├── database.py       # Engine, Base, SessionLocal, get_db()
@@ -102,6 +117,7 @@ backend/
 │   ├── handlers/             # HTTP-layer request unpackers & response formatters
 │   │   ├── agent_handler.py                  # Agent SSE streaming chat handler
 │   │   ├── ai_handler.py                     # AI discovery & completion handlers
+│   │   ├── artifact_handler.py               # Artifact generate (report/image/plan), list, download & delete handlers
 │   │   ├── business_action_handler.py        # Business action recommendation & status handlers
 │   │   ├── promotion_handler.py              # Promotion generation, list, detail, status & eval handlers
 │   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
@@ -114,6 +130,7 @@ backend/
 │   ├── helpers/              # Logging, exceptions, error codes, response builders
 │   ├── middlewares/          # RequestContextMiddleware & auth dependency guards
 │   ├── models/               # SQLAlchemy ORM models & Pydantic schemas
+│   │   ├── artifact.py                  # Artifact model (type, format, status, storage path, business isolation)
 │   │   ├── business_action.py           # Persisted recommendations and lifecycle status
 │   │   ├── promotion_plan.py            # Promotion proposals, financial metrics & lifecycle status
 │   │   ├── sales_report_submission.py   # Ingestion submissions
@@ -126,6 +143,7 @@ backend/
 │   │   └── schemas/          # Input/output schemas (BaseModel)
 │   │       ├── agent.py                  # SSE event & chat request schemas
 │   │       ├── ai.py                     # AI provider schemas
+│   │       ├── artifact.py               # GenerateReportRequest, GenerateImageRequest, ArtifactResponse, DownloadLink
 │   │       ├── business_action.py        # GenerateActionsRequest, UpdateActionStatus, Response
 │   │       ├── promotion.py              # GeneratePromotionRequest, PromotionPlanResponse, Evaluate
 │   │       ├── sales_report_processing.py # Batch form, process response & SSE schemas
@@ -137,6 +155,7 @@ backend/
 │   ├── routes/               # FastAPI APIRouter endpoints mounted under /api/v1/
 │   │   ├── agent_routes.py               # Agent chat endpoint
 │   │   ├── ai_routes.py                  # AI discovery & completion endpoints
+│   │   ├── artifact_routes.py            # Artifact generation, list, download & delete routes (dual: business + direct)
 │   │   ├── business_action_routes.py     # Business Action Center routes (/generate, status, filters)
 │   │   ├── promotion_routes.py           # AI-Assisted Promotion Planner routes (/generate, plans, eval)
 │   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
@@ -150,11 +169,15 @@ backend/
 │   │   ├── action_narrative_generator.py     # Dynamic AI narrative generation (English prompts, JSON schema)
 │   │   ├── agent_service.py                  # LangGraph astream_events orchestration
 │   │   ├── ai_service.py                     # AMD AI service orchestration
+│   │   ├── artifact_service.py               # Artifact orchestration: DB persistence, storage, download, metadata
+│   │   ├── artifact_storage.py               # File storage abstraction (local/S3), signed download tokens
 │   │   ├── business_action_engine.py         # Deterministic multi-domain recommendation engine (10 rules)
 │   │   ├── business_action_service.py        # BAC orchestration, deduplication, persistence & ephemeral mode
+│   │   ├── image_generator.py                # F&B image generation with model verification & prompt enhancement
 │   │   ├── promotion_engine.py               # Pure deterministic promotion math, scenarios & constraints
 │   │   ├── promotion_narrative_generator.py  # AI promotion copy, operational notes & risk generation
 │   │   ├── promotion_service.py              # Promotion planner orchestration, evaluation & persistence
+│   │   ├── report_generator.py               # CSV/XLSX/PDF report & plan export generation (6 report types)
 │   │   ├── sales_report_processing_service.py # Ingestion orchestrator (spreadsheet/photo/form)
 │   │   ├── input_profiler.py                 # Spreadsheet structural profiler (multi-sheet support)
 │   │   ├── semantic_mapper.py                # LLM-based column mapper & sheet role classifier
@@ -165,6 +188,9 @@ backend/
 │   │   ├── sales_report_staging_row_service.py# Staging row persistence & bulk updates
 │   │   ├── forecasting_engine.py             # Statistical forecasting engine (SMA, EMA, Holt-Winters, Backtesting)
 │   │   ├── forecasting_service.py            # Forecasting orchestration, validation & DB persistence
+│   │   ├── expense_import_service.py         # Expense ingestion orchestrator, branch resolution, AI categorization
+│   │   ├── expense_photo_extractor.py        # Vision OCR extraction for expense receipts/invoices
+│   │   ├── expense_spreadsheet_parser.py     # Expense spreadsheet (.xlsx, .csv) parser with dynamic mapping
 │   │   └── <entity>_service.py
 │   └── main.py               # FastAPI application entry point & lifespan management
 ├── alembic/                  # Database migration scripts & environment
@@ -173,9 +199,11 @@ backend/
 │   ├── test_agent_*.py                   # Agent auth, graph, streaming, and tool suites
 │   ├── test_ai_endpoints.py              # Tests for /api/v1/ai routes
 │   ├── test_amd_client.py                # Tests for AMDTokenFactoryClient
+│   ├── test_artifact_service.py          # 31 tests: storage, reports, images, API routes, multi-tenant, downloads
 │   ├── test_auto_price_cost_history.py   # Auto-sync price & cost history from spreadsheet/photo imports
 │   ├── test_business_action_engine.py    # Deterministic rule engine, scoring, and modifier tests
 │   ├── test_business_actions.py          # BAC endpoints, persistence, lifecycle, and agent tool tests
+│   ├── test_expense_import.py            # 13 tests: expense parsing, OCR, AI mapping/categorization, batch workflow
 │   ├── test_promotion_engine.py          # Pure deterministic promotion math & scenario tests
 │   ├── test_promotion_planner.py         # Promotion endpoints, lifecycle, evaluation & agent tool tests
 │   ├── test_sales_report_processing.py   # Multi-channel ingestion, validation, and confirmation
@@ -188,7 +216,7 @@ backend/
 │   └── test_*.py                         # Feature-grouped test files
 ├── .env.example              # Environment variables template
 ├── alembic.ini               # Alembic configuration
-└── requirements.txt          # Python dependencies
+└── requirements.txt
 ```
 
 ---
@@ -270,6 +298,19 @@ SEMANTIC_MAPPING_ENABLED=true    # Toggle LLM dynamic mapping
 SEMANTIC_MAPPING_MODEL=""        # Model for column mapping (empty = AMD_DEFAULT_MODEL)
 SEMANTIC_MAPPING_TEMPERATURE=0.0 # Deterministic schema mapping
 SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD=0.7 # Minimum confidence score threshold
+
+# Artifact & File Generation Service
+ARTIFACT_STORAGE_BACKEND=local   # "local" or "s3"
+ARTIFACT_LOCAL_STORAGE_PATH=./storage/artifacts
+ARTIFACT_MAX_FILE_SIZE_MB=50     # Max generated file size
+ARTIFACT_DOWNLOAD_TOKEN_EXPIRE_MINUTES=30
+ARTIFACT_CLEANUP_AFTER_DAYS=90
+
+# Image Generation Configuration
+IMAGE_GEN_API_KEY=               # API key for image generation provider
+IMAGE_GEN_BASE_URL=              # Provider base URL (OpenAI-compatible)
+IMAGE_GEN_MODEL=                 # Must be an explicit image-gen model; empty = disabled
+IMAGE_GEN_TIMEOUT=120
 ```
 
 > **Note:** If `AMD_API_KEY` is not provided, the application will boot and run normal CRUD, spreadsheet parsing (via static fallback), and manual form processing without issue. Calls to AI-specific endpoints will return a standardized `503 Service Unavailable` (`ERR-AI-501`).
@@ -329,6 +370,8 @@ All API routes are prefixed with `/api/v1`.
 - `GET /api/v1/businesses/{id}/product_cost_history` — Cost history tracking
 - `GET /api/v1/businesses/{id}/product_price_history` — Price history tracking
 - `GET /api/v1/businesses/{id}/expenses` — Expense ledger tracking
+- `POST /api/v1/businesses/{id}/expenses/import` — Ingest expenses from spreadsheets (`.xlsx`, `.csv`) or receipt photos with AI dynamic semantic mapping and AI categorization (preview dry-run with `persist=false` or save with `persist=true`).
+- `POST /api/v1/businesses/{id}/expenses/batch` — Atomically insert a batch of expenses (`ExpenseBatchCreate`) in one database transaction (e.g. after preview inspection and client correction).
 
 ### Sales Report Ingestion, Staging & Confirmation
 - `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Ingest spreadsheet (`.xlsx`, `.xls`, `.csv`) or photos (supports single `file` or multi-photo `files` up to 10 images) with LLM dynamic semantic mapping, multi-sheet inspection, draft master data auto-creation, and validation.
@@ -369,6 +412,16 @@ All API routes are prefixed with `/api/v1`.
 - `POST /api/v1/agent/businesses/{business_id}/chat` — Conversational business operations assistant streaming real-time Server-Sent Events (SSE). Requires JWT authentication and business membership.
   - Stream events: `agent_status`, `tool_start`, `tool_result`, `message_delta`, `approval_required`, `agent_error`, `agent_complete`, ending with `[DONE]`.
 
+### Artifact & Business File Generation
+- `POST /api/v1/businesses/{business_id}/artifacts/reports/generate` — Generate a business report in `csv`, `xlsx`, or `pdf` format from validated database records. Report types: `sales_summary`, `financial_summary`, `inventory_status`, `forecast_export`, `promotion_summary`, `action_center_summary`.
+- `POST /api/v1/businesses/{business_id}/artifacts/plans/generate` — Export a structured promotion or action plan as a formatted PDF table, XLSX workbook, or CSV file.
+- `POST /api/v1/businesses/{business_id}/artifacts/images/generate` — Generate an F&B business-purpose image (`product_catalog`, `promotional_poster`, `promotion_visual`) through a verified image generation model.
+- `GET /api/v1/businesses/{business_id}/artifacts/` — List artifacts for a business with filters (`artifact_type`, `status`) and pagination.
+- `GET /api/v1/artifacts/{artifact_id}` — Get artifact detail, file metadata, and status.
+- `GET /api/v1/artifacts/{artifact_id}/download` — Download artifact file (Bearer token or signed `?token=` query parameter).
+- `DELETE /api/v1/artifacts/{artifact_id}` — Soft-delete an artifact record and remove storage file.
+- Direct equivalents available under `/api/v1/artifacts/` for all routes above.
+
 ### AI Endpoints (AMD Token Factory)
 - `GET /api/v1/ai/models` — Runtime discovery of available models with capability flags
 - `GET /api/v1/ai/health` — Check AI provider connectivity, latency, quota, and rate limits
@@ -378,11 +431,17 @@ All API routes are prefixed with `/api/v1`.
 
 ## Testing
 
-The backend includes a comprehensive test suite (**218 test cases**) utilizing an isolated in-memory SQLite database:
+The backend includes a comprehensive test suite (**262 test cases**) utilizing an isolated in-memory SQLite database:
 
 ```bash
 # Run all tests
 pytest -v
+
+# Run Expense Import & Batch Management tests (AI semantic mapping, Vision OCR, Preview & Batch Save)
+pytest tests/test_expense_import.py -v
+
+# Run Artifact Service tests (storage, reports, images, API, multi-tenant isolation, downloads)
+pytest tests/test_artifact_service.py -v
 
 # Run AI-Assisted Promotion Planner tests (Deterministic Engine, Scenarios, Constraints & Endpoints)
 pytest tests/test_promotion_engine.py tests/test_promotion_planner.py -v

@@ -15,7 +15,14 @@ from app.models.schemas.sales_report_staging_row import (
 )
 from app.models.schemas.sales_report_observation import SalesReportObservationCreate, SalesReportObservationUpdate, SalesReportObservationResponse
 from app.models.schemas.import_issue import ImportIssueCreate, ImportIssueUpdate, ImportIssueResponse
-from app.models.schemas.expense import ExpenseCreate, ExpenseUpdate, ExpenseResponse
+from app.models.schemas.expense import (
+    ExpenseCreate,
+    ExpenseUpdate,
+    ExpenseResponse,
+    ExpenseImportItem,
+    ExpenseImportSummary,
+    ExpenseImportResponse,
+)
 from app.models.schemas.product_cost_history import ProductCostHistoryCreate, ProductCostHistoryUpdate, ProductCostHistoryResponse
 from app.models.schemas.product_price_history import ProductPriceHistoryCreate, ProductPriceHistoryUpdate, ProductPriceHistoryResponse
 from app.models.schemas.ai import AIModelInfo, AIHealthResponse, ChatMessage, ChatCompletionRequest
@@ -56,6 +63,14 @@ from app.models.schemas.business_action import (
     UpdateActionStatusRequest,
     BusinessActionResponse,
     GenerateActionsResponse,
+)
+from app.models.schemas.artifact import (
+    GenerateReportRequest,
+    GeneratePlanArtifactRequest,
+    GenerateImageRequest,
+    ArtifactFilterParams,
+    ArtifactResponse,
+    DownloadUrlResponse,
 )
 
 
@@ -100,6 +115,9 @@ __all__ = [
     "ExpenseCreate",
     "ExpenseUpdate",
     "ExpenseResponse",
+    "ExpenseImportItem",
+    "ExpenseImportSummary",
+    "ExpenseImportResponse",
     "ProductCostHistoryCreate",
     "ProductCostHistoryUpdate",
     "ProductCostHistoryResponse",
@@ -140,5 +158,12 @@ __all__ = [
     "UpdateActionStatusRequest",
     "BusinessActionResponse",
     "GenerateActionsResponse",
+    "GenerateReportRequest",
+    "GeneratePlanArtifactRequest",
+    "GenerateImageRequest",
+    "ArtifactFilterParams",
+    "ArtifactResponse",
+    "DownloadUrlResponse",
 ]
+
 

@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 import hashlib
 import json
 import re
@@ -400,6 +401,9 @@ def process_file_submission(
         sheets_skipped: List[str] = []
         sheets_ambiguous: List[str] = []
         extra_issues: List[ImportIssueCreate] = []
+        expenses_to_add: List[Any] = []
+        extracted_expense_count = 0
+        extracted_expense_total = Decimal("0.00")
 
         if input_method == "spreadsheet":
             is_excel = is_excel_content(mime_type, file_name)
@@ -420,13 +424,18 @@ def process_file_submission(
                 )
 
                 reference_sheets: List[str] = []
+                expense_sheets: List[str] = []
+                sales_sheets: List[str] = []
                 for cls in classifications:
                     if cls.role == "sales":
+                        sales_sheets.append(cls.sheet_name)
                         sheets_processed.append(cls.sheet_name)
                     elif cls.role == "reference":
                         reference_sheets.append(cls.sheet_name)
                         sheets_skipped.append(cls.sheet_name)
-                    elif cls.role in ("instructional", "expenses"):
+                    elif cls.role == "expenses":
+                        expense_sheets.append(cls.sheet_name)
+                    elif cls.role == "instructional":
                         sheets_skipped.append(cls.sheet_name)
                     else:  # ambiguous
                         sheets_ambiguous.append(cls.sheet_name)
@@ -439,6 +448,87 @@ def process_file_submission(
                                 raw_value=cls.sheet_name,
                             )
                         )
+
+                # Process expense sheets if present
+                if expense_sheets:
+                    import io as py_io
+                    import openpyxl as py_openpyxl
+                    from app.models.expense import Expense
+                    from app.services.expense_spreadsheet_parser import parse_expense_worksheet
+                    from app.services.expense_import_service import resolve_branch_id
+                    from app.services.semantic_mapper import (
+                        map_expense_columns_with_llm,
+                        build_fallback_expense_mapping,
+                        categorize_expenses_with_llm,
+                    )
+
+                    try:
+                        wb_exp = py_openpyxl.load_workbook(py_io.BytesIO(file_bytes), read_only=True, data_only=True)
+                        profile_by_name = {p.active_sheet_name: p for p in workbook_profile.sheet_profiles}
+
+                        for exp_sheet_name in expense_sheets:
+                            if exp_sheet_name in wb_exp.sheetnames:
+                                exp_ws = wb_exp[exp_sheet_name]
+                                exp_profile = profile_by_name.get(exp_sheet_name)
+                                exp_m_res = None
+                                if exp_profile:
+                                    if settings.SEMANTIC_MAPPING_ENABLED:
+                                        try:
+                                            exp_m_res = _run_coroutine_sync(map_expense_columns_with_llm(exp_profile, biz_context))
+                                        except Exception as e:
+                                            logger.warning(f"Failed to semantically map expense sheet {exp_sheet_name}: {e}. Falling back to default expense mapping.")
+                                            exp_m_res = build_fallback_expense_mapping(exp_profile.headers, reason=f"Semantic mapping error: {str(e)}")
+                                    else:
+                                        exp_m_res = build_fallback_expense_mapping(exp_profile.headers, reason="Semantic mapping disabled")
+
+                                    if exp_m_res:
+                                        mapping_results.append(exp_m_res)
+                                        for entry in exp_m_res.mappings:
+                                            if entry.confidence < settings.SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD and entry.target_field != "_skip":
+                                                extra_issues.append(
+                                                    ImportIssueCreate(
+                                                        source_row_number=None,
+                                                        field_name=entry.target_field,
+                                                        issue_code=ErrorCodeRegistry.RPT_LOW_CONFIDENCE,
+                                                        severity="warning",
+                                                        message=f"Worksheet '{exp_sheet_name}': Column '{entry.source_column}' mapped to '{entry.target_field}' with low confidence ({entry.confidence:.0%})",
+                                                        raw_value=entry.source_column,
+                                                    )
+                                                )
+
+                                exp_rows, _ = parse_expense_worksheet(
+                                    sheet=exp_ws,
+                                    sheet_name=exp_sheet_name,
+                                    mapping_result=exp_m_res,
+                                    default_date=coverage_start,
+                                    default_branch_id=branch_id,
+                                )
+
+                                # Semantic AI category categorization for rows
+                                exp_cats = _run_coroutine_sync(categorize_expenses_with_llm(exp_rows, biz_context))
+                                for idx, r in enumerate(exp_rows):
+                                    parsed_cat = exp_cats[idx] if idx < len(exp_cats) else "Operations"
+                                    b_id = resolve_branch_id(db, business_id, r.get("branch") or r.get("branch_id"), branch_id)
+                                    amt = Decimal(str(r["amount"]))
+                                    extracted_expense_count += 1
+                                    extracted_expense_total += amt
+                                    expenses_to_add.append(
+                                        Expense(
+                                            business_id=business_id,
+                                            branch_id=b_id,
+                                            expense_date=r["expense_date"],
+                                            category=parsed_cat,
+                                            description=r.get("description"),
+                                            amount=amt,
+                                            currency=r.get("currency", "IDR"),
+                                            source_submission_id=submission.id,
+                                            source_row_number=r.get("source_row_number"),
+                                            created_by_user_id=current_user.id,
+                                        )
+                                    )
+                                sheets_processed.append(exp_sheet_name)
+                    except Exception as e:
+                        logger.warning(f"Error parsing expense sheets from workbook: {e}")
 
                 # Retain relevant reference sheets for matching
                 for p in workbook_profile.sheet_profiles:
@@ -453,9 +543,9 @@ def process_file_submission(
                                             biz_context["products"].append({"name": val})
                                             known_prod_names.add(val)
 
-                if not sheets_processed:
+                if not sales_sheets and not expense_sheets:
                     raise ValidationException(
-                        errors={"file": "Workbook contains no worksheets classified with sales report data", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                        errors={"file": "Workbook contains no worksheets classified with sales report or expense data", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
                         message="Spreadsheet contains no data rows",
                         error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
                     )
@@ -464,7 +554,7 @@ def process_file_submission(
                 sheet_mappings: Dict[str, Optional[SemanticMappingResult]] = {}
                 profile_by_name = {p.active_sheet_name: p for p in workbook_profile.sheet_profiles}
 
-                for s_name in sheets_processed:
+                for s_name in sales_sheets:
                     s_profile = profile_by_name[s_name]
                     m_res = None
                     if settings.SEMANTIC_MAPPING_ENABLED:
@@ -479,10 +569,13 @@ def process_file_submission(
                     if m_res:
                         mapping_results.append(m_res)
 
-                raw_rows, _ = parse_excel_workbook(file_bytes, sheet_mappings)
-                # Prevent duplicate imports or double-counting across sheets
-                raw_rows, cross_sheet_issues = _deduplicate_cross_sheet(raw_rows)
-                extra_issues.extend(cross_sheet_issues)
+                if sales_sheets:
+                    raw_rows, _ = parse_excel_workbook(file_bytes, sheet_mappings)
+                    # Prevent duplicate imports or double-counting across sheets
+                    raw_rows, cross_sheet_issues = _deduplicate_cross_sheet(raw_rows)
+                    extra_issues.extend(cross_sheet_issues)
+                else:
+                    raw_rows = []
                 is_vision = False
 
             else:
@@ -555,10 +648,16 @@ def process_file_submission(
             issues_create=issues_create,
         )
 
+        # Persist extracted expenses if any
+        if expenses_to_add:
+            db.add_all(expenses_to_add)
+
         # Enrich summary with sheet metrics
         summary.sheets_processed = sheets_processed
         summary.sheets_skipped = sheets_skipped
         summary.sheets_ambiguous = sheets_ambiguous
+        summary.expenses_extracted = extracted_expense_count
+        summary.expenses_total_amount = extracted_expense_total
 
         submission.status = "reviewed"
         submission.total_rows = summary.total_rows

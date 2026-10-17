@@ -1,4 +1,6 @@
 import logging
+import asyncio
+import concurrent.futures
 from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 from langchain_core.tools import tool, BaseTool
@@ -11,6 +13,13 @@ from app.services import (
     sales_report_submission_service,
     expense_service,
     product_service,
+)
+from app.services.artifact_service import ArtifactService
+from app.models.schemas.artifact import (
+    GenerateReportRequest,
+    GeneratePlanArtifactRequest,
+    GenerateImageRequest,
+    ArtifactFilterParams,
 )
 
 logger = logging.getLogger(__name__)
@@ -545,18 +554,141 @@ def execute_invoke_promotion_planner(
 
 
 
-def execute_invoke_artifact_service(business_id: int, artifact_type: Optional[str] = None) -> Dict[str, Any]:
-    """Stub tool for Artifact Service."""
-    return {
-        "summary": "Artifact service is not yet available in this environment.",
-        "data": {
-            "status": "not_available",
-            "service": "artifact_service",
-            "message": "Artifact service is not yet available in this environment.",
-            "business_id": business_id,
-            "artifact_type": artifact_type,
-        },
-    }
+def execute_invoke_artifact_service(
+    business_id: int,
+    db: Optional[Session] = None,
+    action: Optional[str] = "list",
+    report_type: Optional[str] = "sales_summary",
+    file_format: str = "xlsx",
+    source_plan_id: Optional[int] = None,
+    purpose: Optional[str] = None,
+    prompt: Optional[str] = None,
+    orientation: Optional[str] = "square",
+    artifact_id: Optional[int] = None,
+    artifact_type: Optional[str] = None,
+    title: Optional[str] = None,
+    branch_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Execute artifact generation, plan export, image generation, or retrieval."""
+    if db is None:
+        return {
+            "summary": "Artifact service is not yet available in this environment.",
+            "data": {
+                "status": "not_available",
+                "service": "artifact_service",
+                "message": "Artifact service is not yet available in this environment.",
+                "business_id": business_id,
+                "artifact_type": artifact_type,
+            },
+            "error": "db session is required",
+        }
+
+    artifact_svc = ArtifactService()
+    resolved_action = action or "list"
+    try:
+        if resolved_action == "generate_report":
+            req = GenerateReportRequest(
+                report_type=report_type or "sales_summary",
+                file_format=file_format or "xlsx",
+                branch_id=branch_id,
+                title=title,
+            )
+            result = artifact_svc.generate_report(db, business_id=business_id, request=req)
+            return {
+                "summary": f"Generated {result.artifact_type} ({result.file_format.upper()}): '{result.title}'. Download URL: {result.download_url}",
+                "data": {
+                    "status": "success",
+                    "artifact": result.model_dump(mode="json"),
+                },
+            }
+        elif resolved_action == "generate_plan":
+            if not source_plan_id:
+                return {
+                    "summary": "source_plan_id is required to export a plan artifact",
+                    "data": None,
+                    "error": "source_plan_id is required",
+                }
+            req = GeneratePlanArtifactRequest(
+                source_plan_id=source_plan_id,
+                file_format=file_format or "pdf",
+                title=title,
+            )
+            result = artifact_svc.generate_plan_artifact(db, business_id=business_id, request=req)
+            return {
+                "summary": f"Generated plan export ({result.file_format.upper()}): '{result.title}'. Download URL: {result.download_url}",
+                "data": {
+                    "status": "success",
+                    "artifact": result.model_dump(mode="json"),
+                },
+            }
+        elif resolved_action == "generate_image":
+            img_purpose = purpose or "promotional_poster"
+            img_prompt = prompt or "Appetizing restaurant promotional visual of fresh menu items"
+            req = GenerateImageRequest(
+                purpose=img_purpose,
+                prompt=img_prompt,
+                orientation=orientation or "square",
+                promotion_plan_id=source_plan_id,
+                title=title,
+            )
+            coro = artifact_svc.generate_image(db, business_id=business_id, request=req)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(asyncio.run, coro).result()
+            else:
+                result = asyncio.run(coro)
+
+            return {
+                "summary": f"Generated business image ({result.purpose}): '{result.title}'. Download URL: {result.download_url}",
+                "data": {
+                    "status": "success",
+                    "artifact": result.model_dump(mode="json"),
+                },
+            }
+        elif resolved_action == "list":
+            filters = ArtifactFilterParams(artifact_type=artifact_type)
+            items, total = artifact_svc.list_artifacts(db, business_id=business_id, filters=filters)
+            return {
+                "summary": f"Found {total} artifact(s) for business.",
+                "data": {
+                    "status": "success",
+                    "total": total,
+                    "artifacts": [item.model_dump(mode="json") for item in items],
+                },
+            }
+        elif resolved_action == "get":
+            if not artifact_id:
+                return {
+                    "summary": "artifact_id is required to retrieve an artifact",
+                    "data": None,
+                    "error": "artifact_id is required",
+                }
+            result = artifact_svc.get_artifact(db, business_id=business_id, artifact_id=artifact_id)
+            return {
+                "summary": f"Retrieved artifact #{result.id}: '{result.title}'. Download URL: {result.download_url}",
+                "data": {
+                    "status": "success",
+                    "artifact": result.model_dump(mode="json"),
+                },
+            }
+        else:
+            return {
+                "summary": f"Unsupported action: '{resolved_action}'. Expected generate_report, generate_plan, generate_image, list, or get.",
+                "data": None,
+                "error": f"Invalid action: {resolved_action}",
+            }
+    except Exception as e:
+        logger.warning(f"Error executing artifact service for business {business_id}: {type(e).__name__}: {str(e)}")
+        return {
+            "summary": f"Artifact service failed: {str(e)}",
+            "data": None,
+            "error": str(e),
+        }
 
 
 def execute_tool_by_name(
@@ -640,7 +772,18 @@ def execute_tool_by_name(
         elif tool_name == "invoke_artifact_service":
             return execute_invoke_artifact_service(
                 business_id,
+                db=db,
+                action=safe_args.get("action", "generate_report"),
+                report_type=safe_args.get("report_type", "sales_summary"),
+                file_format=safe_args.get("file_format", "xlsx"),
+                source_plan_id=safe_args.get("source_plan_id"),
+                purpose=safe_args.get("purpose"),
+                prompt=safe_args.get("prompt"),
+                orientation=safe_args.get("orientation", "square"),
+                artifact_id=safe_args.get("artifact_id"),
                 artifact_type=safe_args.get("artifact_type"),
+                title=safe_args.get("title"),
+                branch_id=safe_args.get("branch_id"),
             )
         else:
             return {
@@ -778,11 +921,35 @@ def get_agent_tools(db: Session, business_id: int) -> List[BaseTool]:
 
     @tool
     def invoke_artifact_service(
+        action: Optional[str] = "generate_report",
+        report_type: Optional[str] = "sales_summary",
+        file_format: Optional[str] = "xlsx",
+        source_plan_id: Optional[int] = None,
+        purpose: Optional[str] = None,
+        prompt: Optional[str] = None,
+        orientation: Optional[str] = "square",
+        artifact_id: Optional[int] = None,
         artifact_type: Optional[str] = None,
+        title: Optional[str] = None,
+        branch_id: Optional[int] = None,
         business_id: Optional[int] = None,
     ) -> dict:
-        """Generate or retrieve business artifacts and reports (stub service)."""
-        return execute_invoke_artifact_service(bound_business_id, artifact_type=artifact_type)
+        """Generate or retrieve business artifacts, reports (sales, financial, inventory, forecast), plan exports, or F&B marketing images."""
+        return execute_invoke_artifact_service(
+            bound_business_id,
+            db=bound_db,
+            action=action or "generate_report",
+            report_type=report_type or "sales_summary",
+            file_format=file_format or "xlsx",
+            source_plan_id=source_plan_id,
+            purpose=purpose,
+            prompt=prompt,
+            orientation=orientation or "square",
+            artifact_id=artifact_id,
+            artifact_type=artifact_type,
+            title=title,
+            branch_id=branch_id,
+        )
 
     return [
         business_summary,

@@ -12,6 +12,9 @@ from app.helpers.exceptions import (
     AIConfigException,
     AgentTimeoutException,
     AgentCancelledException,
+    ArtifactNotFoundException,
+    ArtifactGenerationException,
+    ImageGenerationException,
 )
 from app.helpers.response import success_response, paginated_response, error_response
 from app.helpers.logging import setup_logging, logger, request_id_var, error_code_var
@@ -31,6 +34,9 @@ __all__ = [
     "AIConfigException",
     "AgentTimeoutException",
     "AgentCancelledException",
+    "ArtifactNotFoundException",
+    "ArtifactGenerationException",
+    "ImageGenerationException",
     "success_response",
     "paginated_response",
     "error_response",

@@ -16,6 +16,7 @@ from app.models.forecast_run import ForecastRun
 from app.models.forecast_result import ForecastResult
 from app.models.business_action import BusinessAction
 from app.models.promotion_plan import PromotionPlan
+from app.models.artifact import Artifact
 
 __all__ = [
     "BigIntId",
@@ -38,6 +39,8 @@ __all__ = [
     "ForecastResult",
     "BusinessAction",
     "PromotionPlan",
+    "Artifact",
 ]
+
 
 

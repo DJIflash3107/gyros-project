@@ -1,17 +1,68 @@
-from typing import Optional
-from fastapi import APIRouter, Depends, Query
+from datetime import date
+from typing import Optional, List
+from fastapi import APIRouter, Depends, Query, File, Form, UploadFile
 from sqlalchemy.orm import Session
 from app.configs.database import get_db
 from app.models.user import User
-from app.models.schemas.expense import ExpenseCreate, ExpenseUpdate
+from app.models.schemas.expense import ExpenseCreate, ExpenseBatchCreate, ExpenseUpdate
 from app.models.schemas.pagination import PaginationParams
 from app.middlewares.auth import get_current_user, require_business_membership
 from app.handlers import expense_handler
+from app.helpers.exceptions import ValidationException
 
 router = APIRouter(
     prefix="/api/v1/businesses/{business_id}/expenses",
     tags=["Expenses"],
 )
+
+
+@router.post("/import", status_code=200, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+async def import_expenses(
+    business_id: int,
+    files: Optional[List[UploadFile]] = File(None),
+    file: Optional[UploadFile] = File(None),
+    input_method: str = Form("spreadsheet"),
+    branch_id: Optional[int] = Form(None),
+    default_date: Optional[date] = Form(None),
+    persist: bool = Form(True),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    upload_files: List[UploadFile] = []
+    if files:
+        upload_files.extend(files)
+    if file and file.filename:
+        upload_files.append(file)
+    if not upload_files:
+        raise ValidationException(
+            message="No upload file provided",
+            errors={"file": "At least one file is required"},
+        )
+
+    return await expense_handler.import_expenses_handler(
+        business_id=business_id,
+        files=upload_files,
+        input_method=input_method,
+        branch_id=branch_id,
+        default_date=default_date,
+        persist=persist,
+        current_user=current_user,
+        db=db,
+    )
+
+
+@router.post("/batch", status_code=201, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+def create_expenses_batch(
+    business_id: int,
+    data: ExpenseBatchCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Save multiple expense records in a single atomic batch transaction.
+    Ideal for saving or committing expenses after inspecting and correcting previewed import data.
+    """
+    return expense_handler.create_expenses_batch_handler(business_id, data, current_user, db)
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])

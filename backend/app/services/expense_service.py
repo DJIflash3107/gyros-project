@@ -43,6 +43,53 @@ def create_expense(
     return expense
 
 
+def create_expenses_batch(
+    db: Session,
+    business_id: int,
+    items: list[ExpenseCreate],
+    current_user: User,
+) -> Tuple[list[Expense], dict]:
+    branch_ids = {item.branch_id for item in items if item.branch_id is not None}
+    if branch_ids:
+        existing_branch_ids = {
+            b.id for b in db.query(Branch.id).filter(Branch.id.in_(branch_ids), Branch.business_id == business_id).all()
+        }
+        invalid_branches = branch_ids - existing_branch_ids
+        if invalid_branches:
+            raise NotFoundException(
+                message="One or more branches not found",
+                errors={"branch_id": f"Branches {list(invalid_branches)} do not exist in business {business_id}"},
+            )
+
+    expenses_to_add = [
+        Expense(
+            business_id=business_id,
+            branch_id=item.branch_id,
+            expense_date=item.expense_date,
+            category=item.category,
+            description=item.description,
+            amount=item.amount,
+            currency=item.currency,
+            source_submission_id=item.source_submission_id,
+            source_row_number=item.source_row_number,
+            created_by_user_id=current_user.id,
+        )
+        for item in items
+    ]
+    db.add_all(expenses_to_add)
+    db.commit()
+    for exp in expenses_to_add:
+        db.refresh(exp)
+
+    total_amount = sum(item.amount for item in items)
+    summary = {
+        "total_saved": len(expenses_to_add),
+        "total_amount": float(total_amount),
+    }
+    return expenses_to_add, summary
+
+
+
 def list_expenses(
     db: Session,
     business_id: int,

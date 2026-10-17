@@ -1,8 +1,9 @@
+from datetime import date
 from typing import Optional
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from app.models.user import User
-from app.models.schemas.expense import ExpenseCreate, ExpenseUpdate, ExpenseResponse
+from app.models.schemas.expense import ExpenseCreate, ExpenseBatchCreate, ExpenseUpdate, ExpenseResponse
 from app.models.schemas.pagination import PaginationParams
 from app.services import expense_service
 from app.helpers.response import success_response, paginated_response
@@ -18,6 +19,23 @@ def create_expense_handler(
     return success_response(
         message="Expense created successfully",
         data={"expense": ExpenseResponse.model_validate(expense).model_dump()},
+        status_code=201,
+    )
+
+
+def create_expenses_batch_handler(
+    business_id: int,
+    data: ExpenseBatchCreate,
+    current_user: User,
+    db: Session,
+) -> JSONResponse:
+    expenses, summary = expense_service.create_expenses_batch(db, business_id, data.items, current_user)
+    return success_response(
+        message="Batch expenses created successfully",
+        data={
+            "summary": summary,
+            "expenses": [ExpenseResponse.model_validate(e).model_dump() for e in expenses],
+        },
         status_code=201,
     )
 
@@ -66,3 +84,35 @@ def delete_expense_handler(business_id: int, expense_id: int, db: Session) -> JS
         message="Expense deleted successfully",
         data={},
     )
+
+
+async def import_expenses_handler(
+    business_id: int,
+    files: list,
+    input_method: str,
+    branch_id: Optional[int],
+    default_date: Optional[date],
+    persist: bool,
+    current_user: User,
+    db: Session,
+) -> JSONResponse:
+    from app.services import expense_import_service
+
+    result = await expense_import_service.import_expenses(
+        db=db,
+        business_id=business_id,
+        files=files,
+        input_method=input_method,
+        branch_id=branch_id,
+        default_date=default_date,
+        persist=persist,
+        current_user=current_user,
+    )
+    msg = "Expenses imported successfully" if persist else "Expenses extracted successfully (preview)"
+    status = 201 if persist else 200
+    return success_response(
+        message=msg,
+        data=result.model_dump(),
+        status_code=status,
+    )
+

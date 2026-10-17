@@ -153,3 +153,39 @@ class AgentCancelledException(AppException):
         if errors is None:
             errors = {"agent": message}
         super().__init__(status_code=499, message=message, errors=errors, error_code=error_code)
+
+
+class ArtifactNotFoundException(NotFoundException):
+    def __init__(
+        self,
+        message: str = "Artifact not found",
+        errors: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(message=message, errors=errors, error_code=ErrorCodeRegistry.ART_NOT_FOUND)
+
+
+class ArtifactGenerationException(AppException):
+    def __init__(
+        self,
+        message: str = "Artifact generation failed",
+        status_code: int = 500,
+        errors: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = ErrorCodeRegistry.ART_GENERATION_FAILED,
+    ):
+        if errors is None:
+            errors = {"artifact": message}
+        super().__init__(status_code=status_code, message=message, errors=errors, error_code=error_code)
+
+
+class ImageGenerationException(AppException):
+    def __init__(
+        self,
+        message: str = "Image generation failed",
+        status_code: int = 502,
+        errors: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = ErrorCodeRegistry.ART_GENERATION_FAILED,
+    ):
+        if errors is None:
+            errors = {"image": message}
+        super().__init__(status_code=status_code, message=message, errors=errors, error_code=error_code)
+
