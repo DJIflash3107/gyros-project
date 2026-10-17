@@ -16,6 +16,7 @@ from app.routes.ai_routes import router as ai_router
 from app.routes.agent_routes import router as agent_router
 from app.routes.forecasting_routes import router as forecasting_router, direct_router as direct_forecasting_router
 from app.routes.business_action_routes import router as business_action_router, direct_router as direct_business_action_router
+from app.routes.promotion_routes import router as promotion_router, direct_router as direct_promotion_router
 
 __all__ = [
     "auth_router",
@@ -38,5 +39,8 @@ __all__ = [
     "direct_forecasting_router",
     "business_action_router",
     "direct_business_action_router",
+    "promotion_router",
+    "direct_promotion_router",
 ]
+
 

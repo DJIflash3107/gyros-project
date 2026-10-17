@@ -14,12 +14,14 @@ def test_ai_health_unconfigured(client):
     """When API key is empty/not configured, health check returns unconfigured status."""
     with patch.object(settings, "AMD_API_KEY", ""):
         with patch("app.configs.amd_client.settings.AMD_API_KEY", ""):
-            resp = client.get("/api/v1/ai/health")
-            assert resp.status_code == 200
-            data = resp.json()
-            assert "data" in data
-            assert data["data"]["health"]["status"] == "unconfigured"
-            assert data["data"]["health"]["key_configured"] is False
+            with patch("app.services.ai_service.settings.AMD_API_KEY", ""):
+                resp = client.get("/api/v1/ai/health")
+                assert resp.status_code == 200
+                data = resp.json()
+                assert "data" in data
+                assert data["data"]["health"]["status"] == "unconfigured"
+                assert data["data"]["health"]["key_configured"] is False
+
 
 
 def test_ai_health_healthy(client):

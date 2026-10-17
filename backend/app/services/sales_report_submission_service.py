@@ -1,13 +1,17 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
+from decimal import Decimal
 from typing import Optional, Tuple, Dict
-from sqlalchemy import func, and_
+from sqlalchemy import func, and_, or_
 from sqlalchemy.orm import Session
 from app.models.branch import Branch
 from app.models.product import Product
 from app.models.sales_report_submission import SalesReportSubmission
 from app.models.sales_report_staging_row import SalesReportStagingRow
 from app.models.sales_report_observation import SalesReportObservation
+from app.models.product_price_history import ProductPriceHistory
+from app.models.product_cost_history import ProductCostHistory
 from app.models.user import User
+
 from app.models.schemas.sales_report_submission import (
     SalesReportSubmissionCreate,
     SalesReportSubmissionUpdate,
@@ -170,12 +174,17 @@ def confirm_submission(
             errors={"branches": f"Draft branches must be activated before confirming: {', '.join(draft_names)}"},
         )
 
-    staging_rows = db.query(SalesReportStagingRow).filter(
-        SalesReportStagingRow.submission_id == submission.id
-    ).all()
+    staging_rows = (
+        db.query(SalesReportStagingRow)
+        .filter(SalesReportStagingRow.submission_id == submission.id)
+        .order_by(SalesReportStagingRow.period_start.asc(), SalesReportStagingRow.id.asc())
+        .all()
+    )
 
     accepted_count = 0
     rejected_count = 0
+    synced_prices: Dict[int, Decimal] = {}
+    synced_costs: Dict[int, Decimal] = {}
 
     for row in staging_rows:
         if row.review_status in ["ready", "accepted"]:
@@ -237,8 +246,45 @@ def confirm_submission(
             db.add(observation)
             row.review_status = "accepted"
             accepted_count += 1
+
+            # Auto-sync ProductPriceHistory & ProductCostHistory
+            if row.product_id:
+                effective_date = row.period_start or submission.coverage_start or date.today()
+                prod = db.query(Product).filter(Product.id == row.product_id).first()
+                unit = prod.base_unit if prod and prod.base_unit else "portion"
+
+                # 1. Price History
+                if row.unit_price is not None and row.unit_price > Decimal("0"):
+                    if row.product_id not in synced_prices or synced_prices[row.product_id] != row.unit_price:
+                        _sync_single_price_history(
+                            db=db,
+                            business_id=business_id,
+                            product_id=row.product_id,
+                            price=row.unit_price,
+                            unit=unit,
+                            effective_date=effective_date,
+                            submission_id=submission.id,
+                            user_id=current_user.id,
+                        )
+                        synced_prices[row.product_id] = row.unit_price
+
+                # 2. Cost History
+                if row.unit_cost is not None and row.unit_cost > Decimal("0"):
+                    if row.product_id not in synced_costs or synced_costs[row.product_id] != row.unit_cost:
+                        _sync_single_cost_history(
+                            db=db,
+                            business_id=business_id,
+                            product_id=row.product_id,
+                            cost=row.unit_cost,
+                            unit=unit,
+                            effective_date=effective_date,
+                            submission_id=submission.id,
+                            user_id=current_user.id,
+                        )
+                        synced_costs[row.product_id] = row.unit_cost
         else:
             rejected_count += 1
+
 
     now = datetime.now(timezone.utc)
     submission.total_rows = len(staging_rows)
@@ -320,4 +366,189 @@ def _cleanup_orphan_drafts(db: Session, submission_id: int, business_id: int) ->
 
     db.flush()
     return {"products_deleted": products_deleted, "branches_deleted": branches_deleted}
+
+
+def _sync_single_price_history(
+    db: Session,
+    business_id: int,
+    product_id: int,
+    price: Decimal,
+    unit: str,
+    effective_date: date,
+    submission_id: int,
+    user_id: int,
+) -> None:
+    """
+    Auto-syncs a single ProductPriceHistory record on submission confirmation.
+    Handles exact-date matches, closing previous open price records safely
+    without violating CheckConstraint("effective_to IS NULL OR effective_to > effective_from"),
+    and avoiding duplicate records if the active price is already identical.
+    """
+    # 1. Check if same effective_from already exists
+    same_day = (
+        db.query(ProductPriceHistory)
+        .filter(
+            ProductPriceHistory.business_id == business_id,
+            ProductPriceHistory.product_id == product_id,
+            ProductPriceHistory.effective_from == effective_date,
+        )
+        .first()
+    )
+    if same_day:
+        same_day.selling_price = price
+        same_day.price_unit = unit
+        same_day.source_submission_id = submission_id
+        same_day.created_by_user_id = user_id
+        return
+
+    # 2. Check prior record
+    prior = (
+        db.query(ProductPriceHistory)
+        .filter(
+            ProductPriceHistory.business_id == business_id,
+            ProductPriceHistory.product_id == product_id,
+            ProductPriceHistory.effective_from < effective_date,
+        )
+        .order_by(ProductPriceHistory.effective_from.desc())
+        .first()
+    )
+
+    if prior:
+        if prior.selling_price == price and prior.effective_to is None:
+            # Identical price and already open-ended; no new record needed
+            return
+
+        # Close prior record if open or overlapping
+        if prior.effective_to is None or prior.effective_to >= effective_date:
+            days_diff = (effective_date - prior.effective_from).days
+            if days_diff > 1:
+                prior.effective_to = effective_date - timedelta(days=1)
+            else:
+                # Prior is only 1 day before, cannot set effective_to == effective_from due to CheckConstraint
+                # Overwrite prior record price directly
+                prior.selling_price = price
+                prior.price_unit = unit
+                prior.source_submission_id = submission_id
+                return
+
+    # Check future record to cap effective_to if needed
+    future = (
+        db.query(ProductPriceHistory)
+        .filter(
+            ProductPriceHistory.business_id == business_id,
+            ProductPriceHistory.product_id == product_id,
+            ProductPriceHistory.effective_from > effective_date,
+        )
+        .order_by(ProductPriceHistory.effective_from.asc())
+        .first()
+    )
+    new_effective_to = None
+    if future:
+        if (future.effective_from - effective_date).days > 1:
+            new_effective_to = future.effective_from - timedelta(days=1)
+
+    new_price = ProductPriceHistory(
+        business_id=business_id,
+        product_id=product_id,
+        effective_from=effective_date,
+        effective_to=new_effective_to,
+        selling_price=price,
+        price_unit=unit,
+        source_submission_id=submission_id,
+        created_by_user_id=user_id,
+    )
+    db.add(new_price)
+
+
+def _sync_single_cost_history(
+    db: Session,
+    business_id: int,
+    product_id: int,
+    cost: Decimal,
+    unit: str,
+    effective_date: date,
+    submission_id: int,
+    user_id: int,
+) -> None:
+    """
+    Auto-syncs a single ProductCostHistory record on submission confirmation.
+    Handles exact-date matches, closing previous open cost records safely
+    without violating CheckConstraint("effective_to IS NULL OR effective_to > effective_from"),
+    and avoiding duplicate records if the active cost is already identical.
+    """
+    # 1. Check if same effective_from already exists
+    same_day = (
+        db.query(ProductCostHistory)
+        .filter(
+            ProductCostHistory.business_id == business_id,
+            ProductCostHistory.product_id == product_id,
+            ProductCostHistory.effective_from == effective_date,
+        )
+        .first()
+    )
+    if same_day:
+        same_day.unit_cost = cost
+        same_day.cost_unit = unit
+        same_day.source_submission_id = submission_id
+        same_day.created_by_user_id = user_id
+        return
+
+    # 2. Check prior record
+    prior = (
+        db.query(ProductCostHistory)
+        .filter(
+            ProductCostHistory.business_id == business_id,
+            ProductCostHistory.product_id == product_id,
+            ProductCostHistory.effective_from < effective_date,
+        )
+        .order_by(ProductCostHistory.effective_from.desc())
+        .first()
+    )
+
+    if prior:
+        if prior.unit_cost == cost and prior.effective_to is None:
+            # Identical cost and already open-ended; no new record needed
+            return
+
+        # Close prior record if open or overlapping
+        if prior.effective_to is None or prior.effective_to >= effective_date:
+            days_diff = (effective_date - prior.effective_from).days
+            if days_diff > 1:
+                prior.effective_to = effective_date - timedelta(days=1)
+            else:
+                # Prior is only 1 day before, cannot set effective_to == effective_from due to CheckConstraint
+                # Overwrite prior record cost directly
+                prior.unit_cost = cost
+                prior.cost_unit = unit
+                prior.source_submission_id = submission_id
+                return
+
+    # Check future record to cap effective_to if needed
+    future = (
+        db.query(ProductCostHistory)
+        .filter(
+            ProductCostHistory.business_id == business_id,
+            ProductCostHistory.product_id == product_id,
+            ProductCostHistory.effective_from > effective_date,
+        )
+        .order_by(ProductCostHistory.effective_from.asc())
+        .first()
+    )
+    new_effective_to = None
+    if future:
+        if (future.effective_from - effective_date).days > 1:
+            new_effective_to = future.effective_from - timedelta(days=1)
+
+    new_cost = ProductCostHistory(
+        business_id=business_id,
+        product_id=product_id,
+        effective_from=effective_date,
+        effective_to=new_effective_to,
+        unit_cost=cost,
+        cost_unit=unit,
+        source_submission_id=submission_id,
+        created_by_user_id=user_id,
+    )
+    db.add(new_cost)
+
 

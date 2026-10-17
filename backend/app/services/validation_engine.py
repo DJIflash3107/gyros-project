@@ -1,6 +1,7 @@
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional, Tuple, Set
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -584,6 +585,41 @@ def validate_staging_rows(
                 )
             )
 
+        # Unit Price & Cost
+        parsed_unit_price = parse_decimal(row_dict.get("unit_price"))
+        parsed_unit_cost = parse_decimal(row_dict.get("unit_cost"))
+
+        # Derived price fallback: if unit_price is missing, calculate from recorded_revenue / sold_qty
+        if parsed_unit_price is None and parsed_revenue is not None and parsed_revenue > Decimal("0"):
+            sold = parsed_quantities.get("sold_qty")
+            if sold is not None and sold > Decimal("0"):
+                parsed_unit_price = (parsed_revenue / sold).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        if parsed_unit_price is not None and parsed_unit_price < Decimal("0"):
+            row_issues.append(
+                ImportIssueCreate(
+                    source_row_number=source_row_num,
+                    field_name="unit_price",
+                    issue_code="RPT-VAL-006",
+                    severity="error",
+                    message=f"Unit price cannot be negative ({parsed_unit_price})",
+                    raw_value=str(parsed_unit_price),
+                )
+            )
+
+        if parsed_unit_cost is not None and parsed_unit_cost < Decimal("0"):
+            row_issues.append(
+                ImportIssueCreate(
+                    source_row_number=source_row_num,
+                    field_name="unit_cost",
+                    issue_code="RPT-VAL-006",
+                    severity="error",
+                    message=f"Unit cost cannot be negative ({parsed_unit_cost})",
+                    raw_value=str(parsed_unit_cost),
+                )
+            )
+
+
         # Check 7: Intra-submission Duplicates (RPT-VAL-007, warning)
         if resolved_prod_id and resolved_b_id and period_start and period_end:
             key = (resolved_prod_id, resolved_b_id, period_start, period_end)
@@ -699,9 +735,12 @@ def validate_staging_rows(
             donated_qty=parsed_quantities.get("donated_qty"),
             other_disposition_qty=parsed_quantities.get("other_disposition_qty"),
             recorded_revenue=parsed_revenue,
+            unit_price=parsed_unit_price,
+            unit_cost=parsed_unit_cost,
             extraction_confidence_json=row_dict.get("extraction_confidence_json"),
             review_status=review_status,
         )
+
 
         staging_rows.append(staging_row)
         issues.extend(row_issues)

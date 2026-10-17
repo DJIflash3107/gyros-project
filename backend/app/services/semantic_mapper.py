@@ -28,8 +28,11 @@ CANONICAL_FIELDS: Dict[str, str] = {
     "donated_qty": "Donated quantity",
     "other_disposition_qty": "Other disposition/write-off",
     "recorded_revenue": "Total revenue/sales amount/omzet",
+    "unit_price": "Unit selling price / harga satuan / harga jual per item",
+    "unit_cost": "Unit cost / HPP / harga modal / harga pokok / harga beli per item",
     "_skip": "Column contains no mappable sales report data (e.g. row numbers, notes)",
 }
+
 
 
 class ColumnMappingEntry(BaseModel):

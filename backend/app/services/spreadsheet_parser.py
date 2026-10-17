@@ -89,7 +89,23 @@ COLUMN_MAPPING = {
     "omset": "recorded_revenue",
     "total_penjualan": "recorded_revenue",
     "sales": "recorded_revenue",
+    # Price
+    "unit_price": "unit_price",
+    "price": "unit_price",
+    "harga": "unit_price",
+    "harga_satuan": "unit_price",
+    "harga_jual": "unit_price",
+    "selling_price": "unit_price",
+    # Cost
+    "unit_cost": "unit_cost",
+    "cost": "unit_cost",
+    "hpp": "unit_cost",
+    "modal": "unit_cost",
+    "harga_modal": "unit_cost",
+    "harga_pokok": "unit_cost",
+    "harga_beli": "unit_cost",
 }
+
 
 
 def normalize_header(header: str) -> str:

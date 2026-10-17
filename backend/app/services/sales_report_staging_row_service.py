@@ -47,10 +47,13 @@ def create_staging_row(
         donated_qty=data.donated_qty,
         other_disposition_qty=data.other_disposition_qty,
         recorded_revenue=data.recorded_revenue,
+        unit_price=data.unit_price,
+        unit_cost=data.unit_cost,
         extraction_confidence_json=data.extraction_confidence_json,
         review_status=data.review_status,
         review_notes=data.review_notes,
     )
+
     db.add(row)
     db.commit()
     db.refresh(row)

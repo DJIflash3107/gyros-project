@@ -33,6 +33,7 @@ Read it fully before modifying any code.
 24. [Multi-Sheet Workbook Processing](#24-multi-sheet-workbook-processing)
 25. [Demand Forecasting Service](#25-demand-forecasting-service)
 26. [Business Action Center](#26-business-action-center)
+27. [AI-Assisted Promotion Planner](#27-ai-assisted-promotion-planner)
 
 ---
 
@@ -87,6 +88,7 @@ backend/
 │   │   ├── agent_handler.py                  # Agent streaming chat handler (SSE StreamingResponse)
 │   │   ├── ai_handler.py                     # AI endpoints handler (models, health, completions)
 │   │   ├── business_action_handler.py        # Business action recommendation & status handlers
+│   │   ├── promotion_handler.py              # Promotion generation, list, detail, status & eval handlers
 │   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
 │   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates (including bulk)
 │   │   ├── sales_report_observation_handler.py# Confirmed sales observation queries
@@ -95,7 +97,7 @@ backend/
 │   │   ├── product_alias_handler.py          # Product alias management
 │   │   └── <entity>_handler.py               # HTTP-layer functions (request → response)
 │   ├── helpers/
-│   │   ├── error_codes.py    # ErrorCodeRegistry (standard, AI, agent, report processing, forecasting, BAC)
+│   │   ├── error_codes.py    # ErrorCodeRegistry (standard, AI, agent, report processing, forecasting, BAC, promotion)
 │   │   ├── exceptions.py     # AppException hierarchy (includes AIServiceException, etc.)
 │   │   ├── logging.py        # setup_logging(), logger, request_id_var, error_code_var
 │   │   ├── pagination.py     # paginate() helper
@@ -107,8 +109,9 @@ backend/
 │   │   ├── __init__.py       # Imports all ORM models so Alembic can discover them
 │   │   ├── types.py          # BigIntId, IntUnsigned — dialect-aware column types
 │   │   ├── business_action.py           # Persisted recommendations and lifecycle status
+│   │   ├── promotion_plan.py            # Promotion proposals, financial metrics & lifecycle status
 │   │   ├── sales_report_submission.py   # Ingestion submissions (status, sha256, counters)
-│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, review status, source sheet)
+│   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, review status, unit_price, unit_cost)
 │   │   ├── sales_report_observation.py  # Confirmed observations (unique business/branch/product/period)
 │   │   ├── forecast_run.py              # Forecast runs metadata (model type, params, error metrics)
 │   │   ├── forecast_result.py           # Forecast period points (point, lower, upper bounds)
@@ -119,6 +122,7 @@ backend/
 │   │   ├── agent.py                  # Pydantic schemas for SSE events and chat request
 │   │   ├── ai.py                     # Pydantic schemas for AI models, health, and chat
 │   │   ├── business_action.py        # GenerateActionsRequest, UpdateActionStatus, Response
+│   │   ├── promotion.py              # GeneratePromotionRequest, PromotionPlanResponse, Evaluate
 │   │   ├── sales_report_processing.py # ManualFormBatchCreate, ProcessingResultResponse, SSE schemas
 │   │   ├── sales_report_submission.py # Submission Create/Update/Response
 │   │   ├── sales_report_staging_row.py# Staging row Create/Update/BulkUpdate/Response
@@ -132,6 +136,7 @@ backend/
 │   │   ├── agent_routes.py               # /api/v1/agent routes (POST chat)
 │   │   ├── ai_routes.py                  # /api/v1/ai routes (models, health, chat)
 │   │   ├── business_action_routes.py     # /api/v1/businesses/{id}/business-actions & direct routes
+│   │   ├── promotion_routes.py           # /api/v1/businesses/{id}/promotions & direct routes
 │   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
 │   │   ├── sales_report_staging_row_routes.py# Staging rows CRUD and /bulk update
 │   │   ├── sales_report_observation_routes.py
@@ -145,13 +150,16 @@ backend/
 │   │   ├── ai_service.py                     # AI discovery, capability inference, chat logic
 │   │   ├── business_action_engine.py         # Pure deterministic recommendation engine (10 rules)
 │   │   ├── business_action_service.py        # BAC orchestration, deduplication, persistence & ephemeral mode
+│   │   ├── promotion_engine.py               # Pure deterministic promotion math, scenarios & constraints
+│   │   ├── promotion_narrative_generator.py  # AI promotion copy, operational notes & risk generation
+│   │   ├── promotion_service.py              # Promotion planner orchestration, evaluation & persistence
 │   │   ├── sales_report_processing_service.py # Orchestrator: spreadsheet/photo/form -> staging
 │   │   ├── input_profiler.py                 # Structural profiler (headers, types, sample data, merged cells)
 │   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapping & sheet role classifier
 │   │   ├── spreadsheet_parser.py             # Excel/CSV parser with dynamic mapping + multi-sheet support
 │   │   ├── photo_extractor.py                # AMD VLM extraction with SSE progress streaming
-│   │   ├── validation_engine.py              # 10-step centralized validation & alias resolution
-│   │   ├── sales_report_submission_service.py # Submissions CRUD & atomic observation confirmation
+│   │   ├── validation_engine.py              # 12-step centralized validation & alias resolution
+│   │   ├── sales_report_submission_service.py # Submissions CRUD, confirmation & auto price/cost sync
 │   │   ├── sales_report_staging_row_service.py# Staging row persistence & bulk status updates
 │   │   ├── sales_report_observation_service.py# Confirmed observations & overlap checks
 │   │   ├── forecasting_engine.py             # Predictive time-series models (SMA, EMA, Holt-Winters, Backtesting)
@@ -889,7 +897,7 @@ agent_tools.py ─────────────────────�
   ├── product_catalog ───────────────────── Queries product catalog and status
   ├── invoke_forecasting ────────────────── Generates statistical forecasts via forecasting_service
   ├── invoke_action_center ──────────────── Generates ranked operational recommendations via BAC
-  ├── invoke_promotion_planner ──────────── Stub (future Promotion Planner)
+  ├── invoke_promotion_planner ──────────── Generates promotion proposals and financial evaluations via promotion_service
   └── invoke_artifact_service ───────────── Stub (future artifact generator)
 ```
 
@@ -1135,6 +1143,27 @@ During ingestion (spreadsheet, batch form, or multi-photo), if a product or bran
 - Extracted rows across all photos are aggregated into a single unified `SalesReportSubmission`.
 - Real-time SSE progress events indicate multi-photo progress during extraction.
 
+### Auto-Sync Product Price & Cost History on Confirmation
+
+To ensure downstream services (such as the Demand Forecasting Service and AI-Assisted Promotion Planner) always operate with up-to-date and validated financial baselines, confirming a submission automatically synchronizes `ProductPriceHistory` and `ProductCostHistory`:
+
+1. **Extraction & Canonical Mapping:**
+   - Both Excel files and sales photos extract price and cost data into `unit_price` and `unit_cost` on `SalesReportStagingRow`.
+   - `COLUMN_MAPPING` recognizes Indonesian and English column headers:
+     - Price: `harga`, `harga_jual`, `harga_satuan`, `price`, `unit_price`, `selling_price`.
+     - Cost: `hpp`, `modal`, `harga_modal`, `harga_beli`, `cost`, `unit_cost`, `cogs`.
+   - AI Vision prompts also extract canonical `unit_price` and `unit_cost`.
+2. **Intelligent Derived Price Fallback:**
+   - In `validation_engine.py`, if a report contains no explicit unit price column, `unit_price` is automatically derived as `recorded_revenue / sold_qty` (when `sold_qty > 0`).
+   - If cost is not present in the document, `unit_cost` remains `None` without blocking submission confirmation.
+3. **Chronological & Idempotent Synchronization:**
+   - In `sales_report_submission_service.py`, staging rows are processed chronologically ordered by `period_start.asc(), id.asc()`.
+   - For each distinct product:
+     - **Exact Date Match:** If a record already exists with `effective_from == effective_date`, it updates `selling_price` or `unit_cost` in place.
+     - **Identical Active Price/Cost:** If the latest active record already has the identical price/cost and is open-ended (`effective_to IS NULL`), no redundant duplicate record is inserted.
+     - **Price/Cost Change & Safe Period Closure:** If the price/cost changes, the previous open record is closed with `effective_to = effective_date - 1 day` only if `(effective_date - prior.effective_from).days > 1`, strictly honoring `CheckConstraint("effective_to IS NULL OR effective_to > effective_from")`. If `days <= 1`, it updates the prior record directly to avoid constraint violations.
+   - Records link to `source_submission_id` and `created_by_user_id` for complete auditability.
+
 ---
 
 ## 23. Dynamic Profiling & LLM Semantic Mapping
@@ -1178,6 +1207,7 @@ The semantic mapper targets a fixed canonical dictionary (`CANONICAL_FIELDS`):
 - Stock: `prepared_qty`, `opening_stock_qty`, `received_qty`, `available_stock_qty`, `leftover_qty`
 - Sales & Loss: `sold_qty`, `spoiled_qty`, `damaged_qty`, `staff_meals_qty`, `donated_qty`, `other_disposition_qty`
 - Revenue: `recorded_revenue`
+- Unit Price & Cost: `unit_price`, `unit_cost`
 - Ignored: `_skip` (non-sales metadata, row numbers, arbitrary notes)
 
 ### Deterministic Fallback Strategy
@@ -1407,4 +1437,108 @@ When `generate_actions` is invoked with `persist=True`:
 | `GET` | `/api/v1/business-actions` | Member | Direct endpoint to list actions (pass `business_id` as query parameter). |
 | `GET` | `/api/v1/business-actions/{id}` | Member | Direct endpoint to get action details. |
 | `PATCH` | `/api/v1/business-actions/{id}/status` | Owner / Admin / Manager | Direct endpoint to update action status. |
+
+---
+
+## 27. AI-Assisted Promotion Planner
+
+The AI-Assisted Promotion Planner is an independent operational planning service that generates structured, financially viable promotional proposals (product discounts, bundles, and time-limited deals) for business operators. It combines strict deterministic financial calculations with dynamic LLM-generated promotional narratives.
+
+### Architecture & Data Flow
+
+```
+Client / Business Operations Agent (invoke_promotion_planner)
+      │
+      ▼
+promotion_routes.py (/api/v1/businesses/{b_id}/promotions & /api/v1/promotions)
+      │
+      ▼
+promotion_handler.py (Request validation & standardized JSON response envelope)
+      │
+      ▼
+promotion_service.py (Aggregates prices, costs, observations, forecasts; coordinates engine & narratives)
+      │
+      ├──────────────────────────────┬───────────────────────────────┐
+      ▼                              ▼                               ▼
+promotion_engine.py            promotion_narrative_generator.py  Database (MySQL / SQLite)
+(Pure deterministic engine:    (Async LLM enrichment:            └── promotion_plans
+ discount math, margins,        6 narrative fields: title,            (Persisted proposals &
+ contribution, scenarios,       objective, marketing copy,            lifecycle tracking)
+ financial constraints)         terms, operational notes, risks)
+```
+
+| Component | File | Responsibility |
+|---|---|---|
+| Engine | `app/services/promotion_engine.py` | Pure deterministic financial mathematics. Calculates discounted prices, unit margins, contribution, volume & profit scenarios (conservative, base, aggressive), and checks financial constraint rules. Stateless, zero network calls. |
+| Narrative Generator | `app/services/promotion_narrative_generator.py` | Async LLM narrative generator. Enriches proposals with compelling promotional copy, operational considerations, terms & conditions, and risks & mitigations. Strict error propagation. |
+| Service | `app/services/promotion_service.py` | Fetches active prices, cost histories, recent sales observations, and forecasts; coordinates engine and narrative generator; handles plan evaluation and database persistence. |
+| Handler | `app/handlers/promotion_handler.py` | Async HTTP-layer handlers building standard response envelopes. |
+| Routes | `app/routes/promotion_routes.py` | FastAPI router mounted under `/api/v1/businesses/{business_id}/promotions` and direct `/api/v1/promotions`. |
+| Model | `app/models/promotion_plan.py` | SQLAlchemy ORM model for `promotion_plans` table. |
+| Schemas | `app/models/schemas/promotion.py` | Pydantic schemas: `GeneratePromotionRequest`, `EvaluatePromotionRequest`, `UpdatePromotionStatusRequest`, `PromotionPlanResponse`. |
+
+### Separation of Concerns: Deterministic Math vs. AI Narratives
+
+To guarantee financial integrity and avoid LLM calculation hallucinations:
+1. **Deterministic Layer (`PromotionEngine`)**:
+   - Calculates exact discounted prices based on discount type (`percentage`, `fixed_amount`, `bundle_fixed_price`).
+   - Computes unit contribution margin: `discounted_price - unit_cost`.
+   - Computes margin percentage: `((discounted_price - unit_cost) / discounted_price) * 100`.
+   - Models 3 volume lift scenarios:
+     - `conservative`: +15% volume lift, -5% realization
+     - `base`: +30% volume lift, base margin realization
+     - `aggressive`: +60% volume lift, +5% operational overhead
+   - Computes total projected revenue, total variable cost, and net incremental contribution per scenario.
+   - Evaluates financial constraints (`min_margin_pct`, `max_discount_budget`).
+   - Flags missing cost data transparently: if any item lacks validated cost history, sets `financially_validated=False` and appends detailed missing data warnings.
+2. **AI Narrative Layer (`PromotionNarrativeGenerator`)**:
+   - Formulates customer-facing promotional copy and marketing suggestions.
+   - Outlines kitchen/bar operational considerations (prep time, ingredient shelf-life, peak-hour bottlenecks).
+   - Formulates clear customer terms and conditions (T&Cs).
+   - Identifies commercial and execution risks along with actionable mitigations.
+
+### Financial Validation & Missing Data Handling
+
+- **Cost Data Requirement:** A plan is marked `financially_validated = True` **only** if:
+  1. All participating products have verified cost history records.
+  2. The projected margin meets or exceeds the configurable `min_margin_pct` (default: 15.0%).
+- **Missing Data Disclosures:** If cost data is missing for one or more products:
+  - `financially_validated` is set to `False`.
+  - The plan is still created or previewed with warning issues identifying products with unrecorded cost.
+  - Estimated baseline prices and assumptions are explicitly listed in `assumptions` and `warnings` arrays.
+
+### Promotion Plan Lifecycle
+
+- `draft` — Newly generated promotional proposal awaiting manager approval.
+- `scheduled` — Approved promotion scheduled for an upcoming date window.
+- `active` — Currently running in stores/online.
+- `completed` — Promo period ended; ready for post-mortem analytics.
+- `cancelled` — Promo rejected or terminated prematurely.
+
+### Persistence vs. Ephemeral Previews
+
+- When `persist=True` (default): Persists the generated proposal to `promotion_plans` with a persistent database `id`.
+- When `persist=False`: Generates the complete proposal with AI narratives, returning an ephemeral response (`id=0`) without writing to the database. Ideal for conversational agent exploration.
+
+### Agent Tool Integration (`invoke_promotion_planner`)
+
+The Business Operations Agent (`app/agent/tools.py`) exposes `invoke_promotion_planner`, allowing users to request promotions naturally in chat:
+- Example: *"Buatkan promo bundle untuk Gyros Beef dan Lemon Tea minggu depan dengan diskon 20%"*
+- The agent calls `invoke_promotion_planner` with extracted product IDs, discount parameters, and financial constraints, streaming back the proposal and scenario outcomes.
+
+### Endpoints Reference
+
+| Method | Path | Auth / Role | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/businesses/{b_id}/promotions/generate` | Owner / Admin / Manager | Generate and optionally persist a promotion proposal with AI narratives and financial scenarios. |
+| `GET` | `/api/v1/businesses/{b_id}/promotions/plans` | Member | List promotion plans with filters (`status`, `promotion_type`, `financially_validated`, `product_id`) and pagination. |
+| `GET` | `/api/v1/businesses/{b_id}/promotions/plans/{id}` | Member | Retrieve full promotion plan details, product items, scenarios, and AI copy. |
+| `PATCH` | `/api/v1/businesses/{b_id}/promotions/plans/{id}/status` | Owner / Admin / Manager | Update status (`draft`, `scheduled`, `active`, `completed`, `cancelled`). |
+| `POST` | `/api/v1/businesses/{b_id}/promotions/plans/{id}/evaluate` | Owner / Admin / Manager | Re-evaluate an existing plan's financial viability against current product prices and costs. |
+| `POST` | `/api/v1/promotions/generate` | Owner / Admin / Manager | Direct endpoint to generate a promotion proposal (pass `business_id` in body). |
+| `GET` | `/api/v1/promotions/plans` | Member | Direct endpoint to list promotion plans (pass `business_id` as query param). |
+| `GET` | `/api/v1/promotions/plans/{id}` | Member | Direct endpoint to retrieve promotion plan details. |
+| `PATCH` | `/api/v1/promotions/plans/{id}/status` | Owner / Admin / Manager | Direct endpoint to update plan status. |
+| `POST` | `/api/v1/promotions/plans/{id}/evaluate` | Owner / Admin / Manager | Direct endpoint to re-evaluate an existing plan. |
+
 

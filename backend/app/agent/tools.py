@@ -345,18 +345,204 @@ def execute_invoke_action_center(
         }
 
 
-def execute_invoke_promotion_planner(business_id: int, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Stub tool for Promotion Planner."""
-    return {
-        "summary": "Promotion Planner service is not yet available in this environment.",
-        "data": {
-            "status": "not_available",
-            "service": "promotion_planner",
-            "message": "Promotion Planner service is not yet available in this environment.",
-            "business_id": business_id,
-            "params": params,
-        },
-    }
+def execute_invoke_promotion_planner(
+    business_id: int,
+    db: Optional[Session] = None,
+    action: Optional[str] = "generate",
+    promotion_type: Optional[str] = None,
+    product_ids: Optional[List[int]] = None,
+    items: Optional[List[Dict[str, Any]]] = None,
+    discount_pct: Optional[float] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    branch_id: Optional[int] = None,
+    min_margin_pct: Optional[float] = None,
+    plan_id: Optional[int] = None,
+    persist: bool = False,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Execute Promotion Planner recommendations, listing, or evaluation."""
+    if db is None:
+        return {
+            "summary": "Promotion Planner service is not yet available without a database session.",
+            "data": {
+                "status": "not_available",
+                "service": "promotion_planner",
+                "message": "Promotion Planner requires an active database session.",
+                "business_id": business_id,
+                "action": action,
+            },
+        }
+
+    # If params dictionary passed, extract values
+    if params and isinstance(params, dict):
+        action = params.get("action", action)
+        promotion_type = params.get("promotion_type", promotion_type)
+        product_ids = params.get("product_ids", product_ids)
+        items = params.get("items", items)
+        discount_pct = params.get("discount_pct", discount_pct)
+        start_date = params.get("start_date", start_date)
+        end_date = params.get("end_date", end_date)
+        branch_id = params.get("branch_id", branch_id)
+        min_margin_pct = params.get("min_margin_pct", min_margin_pct)
+        plan_id = params.get("plan_id", plan_id)
+        persist = params.get("persist", persist)
+
+    from datetime import date, timedelta
+    from decimal import Decimal
+    from app.models.product import Product
+    from app.services import promotion_service
+    from app.models.schemas.promotion import (
+        GeneratePromotionRequest,
+        PromotionItemInput,
+        EvaluatePromotionRequest,
+        PromotionPlanResponse,
+    )
+    import asyncio
+    import concurrent.futures
+
+    try:
+        if action == "list":
+            filter_params = {
+                "branch_id": branch_id,
+                "promotion_type": promotion_type,
+                "page": 1,
+                "page_size": 10,
+            }
+            plan_items, pagination = promotion_service.list_plans(
+                db, business_id=business_id, filter_params=filter_params
+            )
+            return {
+                "summary": f"Found {pagination.get('total', len(plan_items))} promotion plans for business {business_id}.",
+                "data": {
+                    "status": "success",
+                    "plans": [PromotionPlanResponse.model_validate(p).model_dump(mode="json") for p in plan_items],
+                    "pagination": pagination,
+                },
+            }
+
+        elif action == "evaluate":
+            if not plan_id:
+                return {
+                    "summary": "plan_id is required to evaluate a promotion plan.",
+                    "data": None,
+                    "error": "Missing plan_id",
+                }
+            eval_req = EvaluatePromotionRequest(
+                business_id=business_id,
+                min_margin_pct=Decimal(str(min_margin_pct)) if min_margin_pct is not None else None,
+            )
+            eval_res = promotion_service.evaluate_plan(
+                db, business_id=business_id, plan_id=plan_id, request=eval_req
+            )
+            return {
+                "summary": f"Evaluated promotion plan #{plan_id}. Financially validated: {eval_res.plan.is_financially_validated}.",
+                "data": {
+                    "status": "success",
+                    "plan": eval_res.plan.model_dump(mode="json"),
+                    "data_summary": eval_res.data_summary,
+                },
+            }
+
+        else:
+            # Default action: "generate"
+            today = date.today()
+            if start_date:
+                s_date = date.fromisoformat(str(start_date)) if isinstance(start_date, str) else start_date
+            else:
+                s_date = today + timedelta(days=1)
+
+            if end_date:
+                e_date = date.fromisoformat(str(end_date)) if isinstance(end_date, str) else end_date
+            else:
+                e_date = s_date + timedelta(days=14)
+
+            # Build PromotionItemInput list
+            promo_items: List[PromotionItemInput] = []
+            if items:
+                for it in items:
+                    promo_items.append(
+                        PromotionItemInput(
+                            product_id=it["product_id"],
+                            discount_type=it.get("discount_type", "percentage"),
+                            discount_value=Decimal(str(it.get("discount_value", discount_pct or 15.0))),
+                            expected_qty=it.get("expected_qty"),
+                            notes=it.get("notes"),
+                        )
+                    )
+            elif product_ids:
+                d_val = Decimal(str(discount_pct if discount_pct is not None else 15.0))
+                for pid in product_ids:
+                    promo_items.append(
+                        PromotionItemInput(
+                            product_id=pid,
+                            discount_type="percentage",
+                            discount_value=d_val,
+                        )
+                    )
+            else:
+                # Pick active products from DB if none specified
+                active_prods = (
+                    db.query(Product)
+                    .filter(Product.business_id == business_id, Product.is_active == True)
+                    .limit(3)
+                    .all()
+                )
+                if not active_prods:
+                    return {
+                        "summary": "No active products found to generate promotion.",
+                        "data": None,
+                        "error": "No active products found for this business",
+                    }
+                d_val = Decimal(str(discount_pct if discount_pct is not None else 15.0))
+                for p in active_prods:
+                    promo_items.append(
+                        PromotionItemInput(
+                            product_id=p.id,
+                            discount_type="percentage",
+                            discount_value=d_val,
+                        )
+                    )
+
+            req = GeneratePromotionRequest(
+                business_id=business_id,
+                branch_id=branch_id,
+                promotion_type=promotion_type or "discount",
+                start_date=s_date,
+                end_date=e_date,
+                items=promo_items,
+                min_margin_pct=Decimal(str(min_margin_pct)) if min_margin_pct is not None else None,
+                persist=persist,
+            )
+
+            coro = promotion_service.generate_plan(db, business_id=business_id, request=req)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(asyncio.run, coro).result()
+            else:
+                result = asyncio.run(coro)
+
+            return {
+                "summary": f"Generated promotion plan: '{result.plan.title}' with {len(result.plan.items)} item(s). Financially validated: {result.plan.is_financially_validated}.",
+                "data": {
+                    "status": "success",
+                    "plan": result.plan.model_dump(mode="json"),
+                    "data_summary": result.data_summary,
+                },
+            }
+    except Exception as e:
+        logger.warning(f"Error executing promotion planner for business {business_id}: {type(e).__name__}: {str(e)}")
+        return {
+            "summary": f"Promotion Planner failed: {str(e)}",
+            "data": None,
+            "error": str(e),
+        }
+
 
 
 def execute_invoke_artifact_service(business_id: int, artifact_type: Optional[str] = None) -> Dict[str, Any]:
@@ -436,8 +622,21 @@ def execute_tool_by_name(
         elif tool_name == "invoke_promotion_planner":
             return execute_invoke_promotion_planner(
                 business_id,
+                db=db,
+                action=safe_args.get("action", "generate"),
+                promotion_type=safe_args.get("promotion_type"),
+                product_ids=safe_args.get("product_ids"),
+                items=safe_args.get("items"),
+                discount_pct=safe_args.get("discount_pct"),
+                start_date=safe_args.get("start_date"),
+                end_date=safe_args.get("end_date"),
+                branch_id=safe_args.get("branch_id"),
+                min_margin_pct=safe_args.get("min_margin_pct"),
+                plan_id=safe_args.get("plan_id"),
+                persist=safe_args.get("persist", False),
                 params=safe_args.get("params"),
             )
+
         elif tool_name == "invoke_artifact_service":
             return execute_invoke_artifact_service(
                 business_id,
@@ -546,11 +745,36 @@ def get_agent_tools(db: Session, business_id: int) -> List[BaseTool]:
 
     @tool
     def invoke_promotion_planner(
+        action: Optional[str] = "generate",
+        promotion_type: Optional[str] = "discount",
+        product_ids: Optional[List[int]] = None,
+        discount_pct: Optional[float] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        branch_id: Optional[int] = None,
+        min_margin_pct: Optional[float] = None,
+        plan_id: Optional[int] = None,
+        persist: bool = False,
         params: Optional[dict] = None,
         business_id: Optional[int] = None,
     ) -> dict:
-        """Create or evaluate promotion plans (stub service)."""
-        return execute_invoke_promotion_planner(bound_business_id, params=params)
+        """Create, list, or evaluate promotional plans (discounts, bundles, time-limited offers) with deterministic financial calculations."""
+        return execute_invoke_promotion_planner(
+            bound_business_id,
+            db=bound_db,
+            action=action,
+            promotion_type=promotion_type,
+            product_ids=product_ids,
+            discount_pct=discount_pct,
+            start_date=start_date,
+            end_date=end_date,
+            branch_id=branch_id,
+            min_margin_pct=min_margin_pct,
+            plan_id=plan_id,
+            persist=persist,
+            params=params,
+        )
+
 
     @tool
     def invoke_artifact_service(

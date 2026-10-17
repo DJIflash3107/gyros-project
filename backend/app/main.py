@@ -31,7 +31,10 @@ from app.routes import (
     direct_forecasting_router,
     business_action_router,
     direct_business_action_router,
+    promotion_router,
+    direct_promotion_router,
 )
+
 
 from contextlib import asynccontextmanager
 from app.configs.amd_client import close_amd_client
@@ -142,3 +145,6 @@ app.include_router(forecasting_router)
 app.include_router(direct_forecasting_router)
 app.include_router(business_action_router)
 app.include_router(direct_business_action_router)
+app.include_router(promotion_router)
+app.include_router(direct_promotion_router)
+

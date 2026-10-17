@@ -31,9 +31,12 @@ class SalesReportStagingRowCreate(BaseModel):
     donated_qty: Optional[Decimal] = None
     other_disposition_qty: Optional[Decimal] = None
     recorded_revenue: Optional[Decimal] = None
+    unit_price: Optional[Decimal] = None
+    unit_cost: Optional[Decimal] = None
     extraction_confidence_json: Optional[Any] = None
     review_status: ReviewStatus = "pending_review"
     review_notes: Optional[str] = None
+
 
 
 class SalesReportStagingRowUpdate(BaseModel):
@@ -58,9 +61,12 @@ class SalesReportStagingRowUpdate(BaseModel):
     donated_qty: Optional[Decimal] = None
     other_disposition_qty: Optional[Decimal] = None
     recorded_revenue: Optional[Decimal] = None
+    unit_price: Optional[Decimal] = None
+    unit_cost: Optional[Decimal] = None
     extraction_confidence_json: Optional[Any] = None
     review_status: Optional[ReviewStatus] = None
     review_notes: Optional[str] = None
+
 
 
 class SalesReportStagingRowBulkUpdate(BaseModel):
@@ -112,9 +118,12 @@ class SalesReportStagingRowResponse(BaseModel):
     donated_qty: Optional[Decimal] = None
     other_disposition_qty: Optional[Decimal] = None
     recorded_revenue: Optional[Decimal] = None
+    unit_price: Optional[Decimal] = None
+    unit_cost: Optional[Decimal] = None
     extraction_confidence_json: Optional[Any] = None
     review_status: str
     review_notes: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
 

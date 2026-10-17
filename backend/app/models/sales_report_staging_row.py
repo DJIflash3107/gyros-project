@@ -40,6 +40,10 @@ class SalesReportStagingRow(Base):
     # Revenue DECIMAL(14, 2)
     recorded_revenue: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
 
+    # Unit price & cost DECIMAL(14, 2)
+    unit_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    unit_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+
     extraction_confidence_json: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     review_status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending_review")
     review_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

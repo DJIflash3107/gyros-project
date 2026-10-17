@@ -19,6 +19,9 @@ from app.services import (
     forecasting_service,
     business_action_engine,
     business_action_service,
+    promotion_engine,
+    promotion_service,
+    promotion_narrative_generator,
 )
 
 __all__ = [
@@ -42,5 +45,9 @@ __all__ = [
     "forecasting_service",
     "business_action_engine",
     "business_action_service",
+    "promotion_engine",
+    "promotion_service",
+    "promotion_narrative_generator",
 ]
+
 

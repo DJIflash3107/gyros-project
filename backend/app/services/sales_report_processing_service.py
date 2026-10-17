@@ -197,9 +197,12 @@ def _persist_staging_rows_and_issues(
             donated_qty=row_data.donated_qty,
             other_disposition_qty=row_data.other_disposition_qty,
             recorded_revenue=row_data.recorded_revenue,
+            unit_price=row_data.unit_price,
+            unit_cost=row_data.unit_cost,
             extraction_confidence_json=row_data.extraction_confidence_json,
             review_status=row_data.review_status,
         )
+
         db.add(staging_row)
         created_rows.append(staging_row)
 
