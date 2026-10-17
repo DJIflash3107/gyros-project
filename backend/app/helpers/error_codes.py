@@ -49,3 +49,10 @@ class ErrorCodeRegistry:
     FC_PRODUCT_NOT_FOUND = "ERR-FC-004"
     FC_RUN_NOT_FOUND = "ERR-FC-005"
     FC_EVALUATION_FAILED = "ERR-FC-010"
+    RPT_VAL_011 = "RPT-VAL-011"  # Product auto-created as draft
+    RPT_VAL_012 = "RPT-VAL-012"  # Branch auto-created as draft
+
+
+RPT_VAL_011 = "RPT-VAL-011"
+RPT_VAL_012 = "RPT-VAL-012"
+

@@ -10,6 +10,8 @@ Granularity = Literal["daily", "weekly", "monthly", "custom_range"]
 class SalesReportStagingRowCreate(BaseModel):
     source_row_number: Optional[int] = None
     source_sheet_name: Optional[str] = None
+    source_image_index: Optional[int] = None
+    source_image_name: Optional[str] = None
     raw_payload_json: Any
     raw_product_name: Optional[str] = Field(default=None, max_length=180)
     branch_id: Optional[int] = None
@@ -36,6 +38,8 @@ class SalesReportStagingRowCreate(BaseModel):
 
 class SalesReportStagingRowUpdate(BaseModel):
     source_sheet_name: Optional[str] = None
+    source_image_index: Optional[int] = None
+    source_image_name: Optional[str] = None
     raw_product_name: Optional[str] = Field(default=None, max_length=180)
     branch_id: Optional[int] = None
     product_id: Optional[int] = None
@@ -87,6 +91,8 @@ class SalesReportStagingRowResponse(BaseModel):
     submission_id: int
     source_row_number: Optional[int] = None
     source_sheet_name: Optional[str] = None
+    source_image_index: Optional[int] = None
+    source_image_name: Optional[str] = None
     raw_payload_json: Any
     raw_product_name: Optional[str] = None
     branch_id: Optional[int] = None

@@ -15,6 +15,8 @@ class Branch(Base):
     branch_code: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    auto_created_from: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime6, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime6, nullable=False, server_default=func.now(), onupdate=func.now())
 

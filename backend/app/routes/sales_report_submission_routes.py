@@ -1,5 +1,5 @@
 from datetime import date
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, Query, File, Form, UploadFile
 from sqlalchemy.orm import Session
 from app.configs.database import get_db
@@ -12,6 +12,7 @@ from app.models.schemas.sales_report_processing import ManualFormBatchCreate
 from app.models.schemas.pagination import PaginationParams
 from app.middlewares.auth import get_current_user, require_business_membership
 from app.handlers import sales_report_submission_handler
+from app.helpers.exceptions import ValidationException
 
 router = APIRouter(
     prefix="/api/v1/businesses/{business_id}/sales_report_submissions",
@@ -22,7 +23,8 @@ router = APIRouter(
 @router.post("/process", status_code=201, dependencies=[Depends(require_business_membership())])
 async def process_submission(
     business_id: int,
-    file: UploadFile = File(...),
+    files: Optional[List[UploadFile]] = File(None),
+    file: Optional[UploadFile] = File(None),
     input_method: str = Form(...),
     report_period_type: str = Form(...),
     coverage_start: date = Form(...),
@@ -32,9 +34,20 @@ async def process_submission(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    upload_files: List[UploadFile] = []
+    if files:
+        upload_files.extend(files)
+    if file and file.filename:
+        upload_files.append(file)
+    if not upload_files:
+        raise ValidationException(
+            message="No upload file provided",
+            errors={"file": "At least one file is required"},
+        )
+
     return await sales_report_submission_handler.process_submission_handler(
         business_id=business_id,
-        file=file,
+        files=upload_files,
         input_method=input_method,
         report_period_type=report_period_type,
         coverage_start=coverage_start,

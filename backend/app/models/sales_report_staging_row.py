@@ -14,6 +14,8 @@ class SalesReportStagingRow(Base):
     submission_id: Mapped[int] = mapped_column(BigIntId, ForeignKey("sales_report_submissions.id", ondelete="CASCADE"), nullable=False, index=True)
     source_row_number: Mapped[Optional[int]] = mapped_column(IntUnsigned, nullable=True)
     source_sheet_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_image_index: Mapped[Optional[int]] = mapped_column(IntUnsigned, nullable=True)
+    source_image_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     raw_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
     raw_product_name: Mapped[Optional[str]] = mapped_column(String(180), nullable=True)
     branch_id: Mapped[Optional[int]] = mapped_column(BigIntId, ForeignKey("branches.id", ondelete="SET NULL"), nullable=True, index=True)

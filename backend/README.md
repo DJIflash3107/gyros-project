@@ -12,11 +12,14 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
 - **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`, `ERR-FOR-001`) and correlated `request_id` context in every log record.
 - **Sales Report Processing & Staging Workflow**:
   - Multi-channel ingestion supporting **Spreadsheets** (`.xlsx`, `.xls`, `.csv`), **Batch Manual Forms** (up to 500 rows), and **Sales-record Photos / Receipts** (vision OCR).
+  - **Multi-Photo Ingestion**: Ingest multiple receipt/sales photos in a single request (up to 10 images via `files`), preserving `source_image_index` and `source_image_name` on staging rows, merged into a unified submission. Full backward compatibility with single `file`.
+  - **Auto-Create Missing Products & Branches (Draft Workflow)**: Automatically creates missing products or branches as `draft` entities (`status="draft"`, `is_active=False`) during ingestion, tagging staging rows as `pending_review` with warnings (`RPT-VAL-011`, `RPT-VAL-012`). Requires explicit operator review and activation (`/activate`) before submission confirmation.
+  - **Orphan Draft Cleanup**: Confirmation automatically cleans up and deletes unreferenced draft products or branches auto-created during the submission.
   - **Multi-Sheet Workbook Processing**: Inspects every worksheet independently in an uploaded `.xlsx`, using LLM sheet role classification (`sales`, `reference`, `instructional`, `ambiguous`), per-sheet column mapping, and cross-sheet duplicate detection.
-  - **Staging-Only Invariant**: Extracted data is always persisted to staging rows (`SalesReportStagingRow`) and is **never** auto-confirmed. Master data (products/branches) are never auto-created from raw uploads; unmapped rows are flagged as `needs_correction`.
+  - **Staging-Only Invariant**: Extracted data is always persisted to staging rows (`SalesReportStagingRow`) and is **never** auto-confirmed.
   - **Bulk Staging Row Review & Update**: Dedicated `PATCH`/`POST` `/staging_rows/bulk` endpoint to mark multiple or all rows as `ready`, set review notes, or update branch/product links in one call.
   - **Explicit Confirmation**: Safe transition from staging rows into immutable confirmed observations (`SalesReportObservation`) via authenticated `POST .../{submission_id}/confirm`.
-  - **Centralized Validation Engine**: 10 automated business integrity checks including product alias resolution, branch validation, date range coverage, non-negative bounds, intra-batch duplicate detection, and cross-submission observation overlap protection.
+  - **Centralized Validation Engine**: 12 automated business integrity checks including product alias resolution, branch validation, date range coverage, non-negative bounds, intra-batch duplicate detection, cross-submission observation overlap protection, and draft activation warnings.
   - **SHA-256 Deduplication**: File hashing blocks accidental re-upload of active submissions.
   - **Real-Time Progress Streaming**: SSE streaming for photo extraction and long-running validation tasks (`report_status`, `extraction_progress`, `validation_result`, `report_complete`, `report_error`).
 - **Dynamic Profiling & LLM Semantic Mapping**:
@@ -44,7 +47,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Graceful degradation: server boots normally without API credentials.
   - Zero placeholder output policy: errors are raised explicitly and traceably.
 - **Database Migrations**: Managed schema versions using **Alembic**.
-- **Automated Testing**: 141 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
+- **Automated Testing**: 152 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
 
 ---
 
@@ -282,17 +285,19 @@ All API routes are prefixed with `/api/v1`.
 - `POST /api/v1/businesses` — Create a new business organization
 - `GET /api/v1/businesses` — List accessible businesses
 - `POST /api/v1/businesses/{id}/memberships` — Manage business members and roles
-- `GET /api/v1/businesses/{id}/branches` — Manage physical/logical branches
-- `GET /api/v1/businesses/{id}/products` — Product catalog and SKU management
+- `GET /api/v1/businesses/{id}/branches` — Manage branches (supports `?status=active|draft|all`)
+- `POST /api/v1/businesses/{id}/branches/{branch_id}/activate` — Activate auto-created draft branch with required info
+- `GET /api/v1/businesses/{id}/products` — Product catalog and SKU management (supports `?status=active|draft|all`)
+- `POST /api/v1/businesses/{id}/products/{product_id}/activate` — Activate auto-created draft product with required info
 - `GET /api/v1/businesses/{id}/product_aliases` — Multi-channel alias mappings
 - `GET /api/v1/businesses/{id}/product_cost_history` — Cost history tracking
 - `GET /api/v1/businesses/{id}/product_price_history` — Price history tracking
 - `GET /api/v1/businesses/{id}/expenses` — Expense ledger tracking
 
 ### Sales Report Ingestion, Staging & Confirmation
-- `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Ingest spreadsheet (`.xlsx`, `.xls`, `.csv`) or photo inputs with LLM dynamic semantic mapping and validation (supports multi-sheet workbooks).
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Ingest spreadsheet (`.xlsx`, `.xls`, `.csv`) or photos (supports single `file` or multi-photo `files` up to 10 images) with LLM dynamic semantic mapping, multi-sheet inspection, draft master data auto-creation, and validation.
 - `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` — Batch manual form submission (up to 500 rows).
-- `POST /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}/confirm` — Atomically confirm reviewed staging rows into immutable `SalesReportObservation` records.
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}/confirm` — Atomically confirm reviewed staging rows into immutable `SalesReportObservation` records (guards against unactivated draft entities; cleans up orphan drafts).
 - `GET /api/v1/businesses/{business_id}/sales_report_submissions` — List submissions with pagination and status filters (`pending`, `processing`, `reviewed`, `confirmed`, `rejected`).
 - `GET /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}` — Get submission details and summary counters.
 - `GET /api/v1/sales_report_submissions/{submission_id}/staging_rows` — Query staging rows by review status (`ready`, `pending_review`, `needs_correction`).
@@ -322,14 +327,14 @@ All API routes are prefixed with `/api/v1`.
 
 ## Testing
 
-The backend includes a comprehensive test suite (**141 test cases**) utilizing an isolated in-memory SQLite database:
+The backend includes a comprehensive test suite (**152 test cases**) utilizing an isolated in-memory SQLite database:
 
 ```bash
 # Run all tests
 pytest -v
 
-# Run Sales Report Processing, Multi-Sheet, Bulk Staging, and Semantic Mapping tests
-pytest tests/test_sales_report_processing.py tests/test_multi_sheet_processing.py tests/test_sales_report_staging_row_bulk.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
+# Run Sales Report Processing, Draft Master Data, Multi-Photo, Multi-Sheet, Bulk Staging, and Semantic Mapping tests
+pytest tests/test_sales_report_processing.py tests/test_validation_engine_draft.py tests/test_draft_activate.py tests/test_multi_photo_processing.py tests/test_multi_sheet_processing.py tests/test_sales_report_staging_row_bulk.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v
 
 # Run Demand Forecasting tests (Engine & Endpoints)
 pytest tests/test_forecasting_engine.py tests/test_forecasting_endpoints.py -v

@@ -175,6 +175,127 @@ def resolve_branch(
     return None, candidate
 
 
+def compute_missing_product_fields(product: Product) -> List[str]:
+    """Return list of fields user should fill before activating."""
+    missing = []
+    if not product.base_unit or product.base_unit == "pcs":
+        missing.append("base_unit")
+    if not product.sku:
+        missing.append("sku")
+    if not product.category:
+        missing.append("category")
+    return missing
+
+
+def compute_missing_branch_fields(branch: Branch) -> List[str]:
+    """Return list of fields user should fill before activating."""
+    missing = []
+    if not branch.branch_code:
+        missing.append("branch_code")
+    if not branch.address:
+        missing.append("address")
+    return missing
+
+
+def resolve_or_create_product(
+    db: Session,
+    business_id: int,
+    raw_name: Optional[str] = None,
+    product_id: Optional[int] = None,
+) -> Tuple[Optional[int], Optional[str], Optional[Product], bool]:
+    """
+    Try to resolve product. If not found and raw_name is provided,
+    auto-create a draft Product with is_active=False, status='draft'.
+    Returns (product_id, product_name, draft_product_or_None, was_auto_created).
+    """
+    # 1. Try existing resolve_product() logic
+    pid, pname = resolve_product(db, business_id, raw_name, product_id)
+    if pid:
+        return pid, pname, None, False
+
+    # 2. Check if a product already exists for this business (idempotent / check drafts)
+    if raw_name and raw_name.strip():
+        clean_name = raw_name.strip()
+        existing = (
+            db.query(Product)
+            .filter(
+                Product.business_id == business_id,
+                func.lower(Product.name) == clean_name.lower(),
+            )
+            .first()
+        )
+        if existing:
+            if existing.status == "draft":
+                return existing.id, existing.name, existing, False
+            if existing.is_active:
+                return existing.id, existing.name, None, False
+            return None, None, None, False
+
+        # 3. Create new draft
+        draft = Product(
+            business_id=business_id,
+            name=clean_name,
+            base_unit="pcs",  # placeholder default
+            is_active=False,
+            status="draft",
+            auto_created_from=clean_name,
+        )
+        db.add(draft)
+        db.flush()
+        return draft.id, draft.name, draft, True
+
+    return None, None, None, False
+
+
+def resolve_or_create_branch(
+    db: Session,
+    business_id: int,
+    raw_branch_name: Optional[str] = None,
+    branch_id: Optional[int] = None,
+    branch_id_default: Optional[int] = None,
+) -> Tuple[Optional[int], Optional[int], Optional[Branch], bool]:
+    """
+    Try to resolve branch. If not found and raw_branch_name is provided,
+    auto-create a draft Branch with is_active=False, status='draft'.
+    Returns (resolved_branch_id, candidate_branch_id_used, draft_branch_or_None, was_auto_created).
+    """
+    # 1. Try existing resolve_branch() logic
+    resolved_id, candidate_id = resolve_branch(db, business_id, branch_id, branch_id_default)
+    if resolved_id:
+        return resolved_id, candidate_id, None, False
+
+    # 2. If raw branch name available, check existing or create draft
+    if raw_branch_name and raw_branch_name.strip():
+        clean_name = raw_branch_name.strip()
+        existing = (
+            db.query(Branch)
+            .filter(
+                Branch.business_id == business_id,
+                func.lower(Branch.name) == clean_name.lower(),
+            )
+            .first()
+        )
+        if existing:
+            if existing.status == "draft":
+                return existing.id, candidate_id or existing.id, existing, False
+            if existing.is_active:
+                return existing.id, candidate_id or existing.id, None, False
+            return None, candidate_id, None, False
+
+        draft = Branch(
+            business_id=business_id,
+            name=clean_name,
+            is_active=False,
+            status="draft",
+            auto_created_from=clean_name,
+        )
+        db.add(draft)
+        db.flush()
+        return draft.id, candidate_id or draft.id, draft, True
+
+    return None, candidate_id, None, False
+
+
 def validate_staging_rows(
     db: Session,
     business_id: int,
@@ -217,14 +338,40 @@ def validate_staging_rows(
         except (ValueError, TypeError):
             row_branch_id = None
 
-        # Check 1: Product Resolution (RPT-VAL-001, error)
-        resolved_prod_id, resolved_prod_name = resolve_product(
+        raw_branch_name = (
+            row_dict.get("raw_branch_name")
+            or row_dict.get("branch_name")
+            or (row_dict.get("branch") if isinstance(row_dict.get("branch"), str) else None)
+        )
+        if not raw_branch_name and isinstance(row_dict.get("branch_id"), str) and not str(row_dict.get("branch_id")).isdigit():
+            raw_branch_name = row_dict.get("branch_id")
+        if raw_branch_name:
+            raw_branch_name = str(raw_branch_name).strip()
+
+        # Check 1: Product Resolution (RPT-VAL-001 error or RPT-VAL-011 draft warning)
+        resolved_prod_id, resolved_prod_name, draft_prod, prod_auto_created = resolve_or_create_product(
             db=db,
             business_id=business_id,
             raw_name=raw_product_name,
             product_id=row_product_id,
         )
-        if not resolved_prod_id:
+        if draft_prod:
+            missing_p = compute_missing_product_fields(draft_prod)
+            missing_p_str = ", ".join(missing_p) if missing_p else "none"
+            row_issues.append(
+                ImportIssueCreate(
+                    source_row_number=source_row_num,
+                    field_name="raw_product_name",
+                    issue_code="RPT-VAL-011",
+                    severity="warning",
+                    message=(
+                        f"Product '{raw_product_name or draft_prod.name}' auto-created as draft (ID {draft_prod.id}). "
+                        f"Missing fields: {missing_p_str}. Please review and activate."
+                    ),
+                    raw_value=str(raw_product_name or draft_prod.name),
+                )
+            )
+        elif not resolved_prod_id:
             row_issues.append(
                 ImportIssueCreate(
                     source_row_number=source_row_num,
@@ -236,14 +383,31 @@ def validate_staging_rows(
                 )
             )
 
-        # Check 2: Branch Existence (RPT-VAL-002, error)
-        resolved_b_id, candidate_b_id = resolve_branch(
+        # Check 2: Branch Existence (RPT-VAL-002 error or RPT-VAL-012 draft warning)
+        resolved_b_id, candidate_b_id, draft_branch, branch_auto_created = resolve_or_create_branch(
             db=db,
             business_id=business_id,
+            raw_branch_name=raw_branch_name,
             branch_id=row_branch_id,
             branch_id_default=branch_id_default,
         )
-        if not resolved_b_id:
+        if draft_branch:
+            missing_b = compute_missing_branch_fields(draft_branch)
+            missing_b_str = ", ".join(missing_b) if missing_b else "none"
+            row_issues.append(
+                ImportIssueCreate(
+                    source_row_number=source_row_num,
+                    field_name="branch_id",
+                    issue_code="RPT-VAL-012",
+                    severity="warning",
+                    message=(
+                        f"Branch '{raw_branch_name or draft_branch.name}' auto-created as draft (ID {draft_branch.id}). "
+                        f"Missing fields: {missing_b_str}. Please review and activate."
+                    ),
+                    raw_value=str(raw_branch_name or candidate_b_id),
+                )
+            )
+        elif not resolved_b_id:
             row_issues.append(
                 ImportIssueCreate(
                     source_row_number=source_row_num,
@@ -266,6 +430,18 @@ def validate_staging_rows(
             period_start = coverage_start
         if period_end is None and coverage_end is not None and report_period_type == "daily" and coverage_start == coverage_end:
             period_end = coverage_end
+
+        # Intelligent single-date fallback: If a row has a specific date (period_start) but no period_end,
+        # it represents single-day/daily sales, so period_end defaults to period_start.
+        if period_start is not None and period_end is None:
+            period_end = period_start
+        elif period_start is None and period_end is not None:
+            period_start = period_end
+        elif period_start is None and period_end is None:
+            if coverage_start is not None:
+                period_start = coverage_start
+            if coverage_end is not None:
+                period_end = coverage_end
 
         if period_start is None:
             row_issues.append(
@@ -331,7 +507,13 @@ def validate_staging_rows(
 
         # Check 5: Granularity Consistency (RPT-VAL-005, warning)
         raw_granularity = row_dict.get("granularity")
-        granularity = raw_granularity or report_period_type or "daily"
+        if raw_granularity:
+            granularity = raw_granularity
+        elif period_start is not None and period_end is not None and period_start == period_end:
+            granularity = "daily"
+        else:
+            granularity = report_period_type or "daily"
+
         if granularity not in ("daily", "weekly", "monthly", "custom_range"):
             row_issues.append(
                 ImportIssueCreate(
@@ -346,16 +528,18 @@ def validate_staging_rows(
             granularity = "daily"
         else:
             if report_period_type in ("daily", "weekly", "monthly") and granularity != report_period_type:
-                row_issues.append(
-                    ImportIssueCreate(
-                        source_row_number=source_row_num,
-                        field_name="granularity",
-                        issue_code="RPT-VAL-005",
-                        severity="warning",
-                        message=f"Row granularity '{granularity}' does not match submission period type '{report_period_type}'",
-                        raw_value=str(granularity),
+                # If a monthly/weekly submission contains single-day daily breakdown rows, allow it without warning
+                if not (report_period_type in ("monthly", "weekly") and granularity == "daily" and period_start == period_end):
+                    row_issues.append(
+                        ImportIssueCreate(
+                            source_row_number=source_row_num,
+                            field_name="granularity",
+                            issue_code="RPT-VAL-005",
+                            severity="warning",
+                            message=f"Row granularity '{granularity}' does not match submission period type '{report_period_type}'",
+                            raw_value=str(granularity),
+                        )
                     )
-                )
             if granularity == "daily" and period_start is not None and period_end is not None:
                 if (period_end - period_start).days > 0:
                     row_issues.append(
@@ -494,6 +678,8 @@ def validate_staging_rows(
         staging_row = SalesReportStagingRowCreate(
             source_row_number=source_row_num,
             source_sheet_name=row_dict.get("source_sheet_name"),
+            source_image_index=row_dict.get("source_image_index"),
+            source_image_name=row_dict.get("source_image_name"),
             raw_payload_json=raw_payload,
             raw_product_name=raw_product_name or resolved_prod_name,
             branch_id=resolved_b_id,

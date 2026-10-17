@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from sqlalchemy import and_, not_
 from sqlalchemy.orm import Session
 
 from app.models.branch import Branch
@@ -18,6 +19,8 @@ from app.models.schemas.sales_report_processing import (
     ProcessingResultResponse,
     ProcessingSummary,
 )
+from app.models.schemas.product import ProductDraftResponse
+from app.models.schemas.branch import BranchDraftResponse
 from app.configs.settings import settings
 from app.helpers.error_codes import ErrorCodeRegistry
 from app.helpers.exceptions import ConflictException, ValidationException, NotFoundException
@@ -44,7 +47,11 @@ from app.services.spreadsheet_parser import (
     normalize_header,
 )
 from app.services.photo_extractor import extract_from_photo
-from app.services.validation_engine import validate_staging_rows
+from app.services.validation_engine import (
+    validate_staging_rows,
+    compute_missing_product_fields,
+    compute_missing_branch_fields,
+)
 
 
 MAX_SPREADSHEET_BYTES = 10 * 1024 * 1024  # 10 MB limit
@@ -82,6 +89,7 @@ def check_duplicate_submission(
             SalesReportSubmission.business_id == business_id,
             SalesReportSubmission.source_sha256 == sha256_hex,
             SalesReportSubmission.status.notin_(["rejected", "failed"]),
+            not_(and_(SalesReportSubmission.status == "confirmed", SalesReportSubmission.accepted_rows == 0)),
         )
         .first()
     )
@@ -168,6 +176,8 @@ def _persist_staging_rows_and_issues(
             submission_id=submission_id,
             source_row_number=row_data.source_row_number,
             source_sheet_name=row_data.source_sheet_name,
+            source_image_index=row_data.source_image_index,
+            source_image_name=row_data.source_image_name,
             raw_payload_json=row_data.raw_payload_json,
             raw_product_name=row_data.raw_product_name,
             branch_id=row_data.branch_id,
@@ -226,12 +236,55 @@ def _persist_staging_rows_and_issues(
     pending_count = sum(1 for r in created_rows if r.review_status == "pending_review")
     needs_corr_count = sum(1 for r in created_rows if r.review_status == "needs_correction")
 
+    # Collect auto-created draft products and branches
+    auto_created_products: List[ProductDraftResponse] = []
+    prod_ids = list({r.product_id for r in created_rows if r.product_id is not None})
+    if prod_ids:
+        draft_prods = (
+            db.query(Product)
+            .filter(Product.id.in_(prod_ids), Product.status == "draft")
+            .all()
+        )
+        for dp in draft_prods:
+            auto_created_products.append(
+                ProductDraftResponse(
+                    id=dp.id,
+                    business_id=dp.business_id,
+                    name=dp.name,
+                    status=dp.status,
+                    missing_fields=compute_missing_product_fields(dp),
+                    auto_created_from=dp.auto_created_from,
+                )
+            )
+
+    auto_created_branches: List[BranchDraftResponse] = []
+    branch_ids = list({r.branch_id for r in created_rows if r.branch_id is not None})
+    if branch_ids:
+        draft_branches = (
+            db.query(Branch)
+            .filter(Branch.id.in_(branch_ids), Branch.status == "draft")
+            .all()
+        )
+        for db_branch in draft_branches:
+            auto_created_branches.append(
+                BranchDraftResponse(
+                    id=db_branch.id,
+                    business_id=db_branch.business_id,
+                    name=db_branch.name,
+                    status=db_branch.status,
+                    missing_fields=compute_missing_branch_fields(db_branch),
+                    auto_created_from=db_branch.auto_created_from,
+                )
+            )
+
     summary = ProcessingSummary(
         total_rows=len(created_rows),
         ready_rows=ready_count,
         pending_review_rows=pending_count,
         needs_correction_rows=needs_corr_count,
         issue_count=len(created_issues),
+        auto_created_products=auto_created_products,
+        auto_created_branches=auto_created_branches,
     )
 
     return created_rows, created_issues, summary
@@ -614,29 +667,129 @@ def process_manual_form_batch(
         raise
 
 
-async def process_photo_submission_stream(
+def process_multi_photo_submission(
     db: Session,
     business_id: int,
     current_user: User,
-    image_bytes: bytes,
-    file_name: str,
-    mime_type: str,
+    images: List[Tuple[bytes, str, str]],  # (bytes, filename, mime_type)
+    report_period_type: str,
+    coverage_start: date,
+    coverage_end: date,
+    branch_id: Optional[int] = None,
+) -> ProcessingResultResponse:
+    """Process multiple images and merge into one submission."""
+    # 1. Compute combined SHA256 (hash of concatenated individual image hashes)
+    combined_hash = hashlib.sha256()
+    for img_bytes, _, _ in images:
+        combined_hash.update(hashlib.sha256(img_bytes).digest())
+    sha256_hex = combined_hash.hexdigest()
+    check_duplicate_submission(db, business_id, sha256_hex)
+
+    # 2. Create single submission
+    submission = SalesReportSubmission(
+        business_id=business_id,
+        submitted_by_user_id=current_user.id,
+        branch_id=branch_id,
+        input_method="photo",
+        report_period_type=report_period_type,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        source_file_name="; ".join(fn for _, fn, _ in images),
+        source_mime_type="multipart/mixed" if len(images) > 1 else images[0][2],
+        source_sha256=sha256_hex,
+        status="processing",
+        total_rows=0,
+        accepted_rows=0,
+        rejected_rows=0,
+    )
+    db.add(submission)
+    db.commit()
+    db.refresh(submission)
+
+    try:
+        products = (
+            db.query(Product)
+            .filter(Product.business_id == business_id, Product.is_active == True)
+            .all()
+        )
+        biz_context = {"products": [{"name": p.name} for p in products]}
+
+        all_raw_rows: List[Dict[str, Any]] = []
+        for img_idx, (img_bytes, img_name, img_mime) in enumerate(images, start=1):
+            rows, metadata = _run_coroutine_sync(
+                extract_from_photo(img_bytes, img_mime, biz_context)
+            )
+            for inner_idx, row in enumerate(rows, start=1):
+                row["source_image_index"] = img_idx
+                row["source_image_name"] = img_name
+                row["source_row_number"] = (
+                    (img_idx - 1) * 1000 + (row.get("source_row_number") or inner_idx)
+                )
+            all_raw_rows.extend(rows)
+
+        # 3. Validate merged rows
+        staging_rows_create, issues_create = validate_staging_rows(
+            db=db,
+            business_id=business_id,
+            submission_id=submission.id,
+            rows=all_raw_rows,
+            branch_id_default=branch_id,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            report_period_type=report_period_type,
+            is_vision=True,
+        )
+
+        # 4. Persist
+        created_rows, created_issues, summary = _persist_staging_rows_and_issues(
+            db=db,
+            submission_id=submission.id,
+            staging_rows_create=staging_rows_create,
+            issues_create=issues_create,
+        )
+
+        submission.status = "reviewed"
+        submission.total_rows = summary.total_rows
+        submission.rejected_rows = summary.needs_correction_rows
+        submission.accepted_rows = 0
+        db.commit()
+        db.refresh(submission)
+
+        return ProcessingResultResponse(
+            submission=SalesReportSubmissionResponse.model_validate(submission),
+            summary=summary,
+            issues=[ImportIssueResponse.model_validate(i) for i in created_issues],
+        )
+    except Exception:
+        submission.status = "failed"
+        db.commit()
+        raise
+
+
+async def process_multi_photo_submission_stream(
+    db: Session,
+    business_id: int,
+    current_user: User,
+    images: List[Tuple[bytes, str, str]],  # (bytes, filename, mime_type)
     report_period_type: str,
     coverage_start: date,
     coverage_end: date,
     branch_id: Optional[int] = None,
 ) -> AsyncIterator[str]:
     """
-    Asynchronously process photo input yielding structured SSE progress events.
+    Asynchronously process multiple photos yielding structured SSE progress events.
     """
-    # Initial validation
+    # 1. Validation & Combined Hash
     max_img_bytes = settings.VISION_MAX_IMAGE_SIZE_MB * 1024 * 1024
-    if len(image_bytes) > max_img_bytes:
-        err_msg = f"Image exceeds maximum size limit of {settings.VISION_MAX_IMAGE_SIZE_MB}MB"
-        yield format_sse("report_error", {"error_code": ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE, "message": err_msg})
-        return
+    combined_hash = hashlib.sha256()
+    for img_bytes, img_name, _ in images:
+        if len(img_bytes) > max_img_bytes:
+            err_msg = f"Image '{img_name}' exceeds maximum size limit of {settings.VISION_MAX_IMAGE_SIZE_MB}MB"
+            yield format_sse("report_error", {"error_code": ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE, "message": err_msg})
+            return
+        combined_hash.update(hashlib.sha256(img_bytes).digest())
 
-    sha256_hex = compute_sha256(image_bytes)
+    sha256_hex = combined_hash.hexdigest()
     existing = (
         db.query(SalesReportSubmission)
         .filter(
@@ -651,7 +804,7 @@ async def process_photo_submission_stream(
             "report_error",
             {
                 "error_code": ErrorCodeRegistry.RPT_DUPLICATE_FILE,
-                "message": f"This file was already submitted as submission ID {existing.id}",
+                "message": f"This submission was already processed as submission ID {existing.id}",
             },
         )
         return
@@ -664,8 +817,8 @@ async def process_photo_submission_stream(
         report_period_type=report_period_type,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
-        source_file_name=file_name,
-        source_mime_type=mime_type,
+        source_file_name="; ".join(fn for _, fn, _ in images),
+        source_mime_type="multipart/mixed" if len(images) > 1 else images[0][2],
         source_sha256=sha256_hex,
         status="processing",
         total_rows=0,
@@ -676,7 +829,13 @@ async def process_photo_submission_stream(
     db.commit()
     db.refresh(submission)
 
-    yield format_sse("report_status", {"step": "extracting", "message": "Sending image to vision model..."})
+    yield format_sse(
+        "report_status",
+        {
+            "step": "extracting",
+            "message": f"Processing {len(images)} image(s) with vision model...",
+        },
+    )
 
     try:
         products = (
@@ -686,11 +845,28 @@ async def process_photo_submission_stream(
         )
         biz_context = {"products": [{"name": p.name} for p in products]}
 
-        raw_rows, metadata = await extract_from_photo(
-            image_bytes=image_bytes,
-            mime_type=mime_type,
-            business_context=biz_context,
-        )
+        all_raw_rows: List[Dict[str, Any]] = []
+        for img_idx, (img_bytes, img_name, img_mime) in enumerate(images, start=1):
+            yield format_sse(
+                "report_status",
+                {
+                    "step": "extracting",
+                    "message": f"Extracting data from image {img_idx}/{len(images)}: {img_name}...",
+                },
+            )
+            raw_rows, metadata = await extract_from_photo(
+                image_bytes=img_bytes,
+                mime_type=img_mime,
+                business_context=biz_context,
+            )
+            for inner_idx, row in enumerate(raw_rows, start=1):
+                row["source_image_index"] = img_idx
+                row["source_image_name"] = img_name
+                row["source_row_number"] = (
+                    (img_idx - 1) * 1000 + (row.get("source_row_number") or inner_idx)
+                )
+            all_raw_rows.extend(raw_rows)
+
     except Exception as e:
         error_code = getattr(e, "error_code", ErrorCodeRegistry.RPT_EXTRACTION_FAILED)
         msg = getattr(e, "message", str(e))
@@ -700,7 +876,7 @@ async def process_photo_submission_stream(
         yield format_sse("report_error", {"error_code": error_code, "message": msg})
         return
 
-    yield format_sse("report_status", {"step": "mapping", "message": "Structuring and verifying extracted fields..."})
+    yield format_sse("report_status", {"step": "mapping", "message": "Structuring and verifying extracted fields across all images..."})
     yield format_sse("report_status", {"step": "validating", "message": "Validating extracted rows..."})
 
     try:
@@ -708,7 +884,7 @@ async def process_photo_submission_stream(
             db=db,
             business_id=business_id,
             submission_id=submission.id,
-            rows=raw_rows,
+            rows=all_raw_rows,
             branch_id_default=branch_id,
             coverage_start=coverage_start,
             coverage_end=coverage_end,
@@ -764,3 +940,32 @@ async def process_photo_submission_stream(
         submission.status = "failed"
         db.commit()
         yield format_sse("report_error", {"error_code": ErrorCodeRegistry.RPT_PROCESSING_ERROR, "message": str(e)})
+
+
+async def process_photo_submission_stream(
+    db: Session,
+    business_id: int,
+    current_user: User,
+    image_bytes: bytes,
+    file_name: str,
+    mime_type: str,
+    report_period_type: str,
+    coverage_start: date,
+    coverage_end: date,
+    branch_id: Optional[int] = None,
+) -> AsyncIterator[str]:
+    """
+    Asynchronously process photo input yielding structured SSE progress events.
+    Delegates to process_multi_photo_submission_stream for single image.
+    """
+    async for event in process_multi_photo_submission_stream(
+        db=db,
+        business_id=business_id,
+        current_user=current_user,
+        images=[(image_bytes, file_name, mime_type)],
+        report_period_type=report_period_type,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        branch_id=branch_id,
+    ):
+        yield event

@@ -9,6 +9,8 @@ from app.models.schemas.sales_report_submission import (
 )
 from app.models.schemas.sales_report_staging_row import Granularity
 from app.models.schemas.import_issue import ImportIssueResponse
+from app.models.schemas.product import ProductDraftResponse
+from app.models.schemas.branch import BranchDraftResponse
 
 
 class ManualFormRowInput(BaseModel):
@@ -61,6 +63,8 @@ class ProcessingSummary(BaseModel):
     sheets_processed: List[str] = Field(default_factory=list)
     sheets_skipped: List[str] = Field(default_factory=list)
     sheets_ambiguous: List[str] = Field(default_factory=list)
+    auto_created_products: List[ProductDraftResponse] = Field(default_factory=list)
+    auto_created_branches: List[BranchDraftResponse] = Field(default_factory=list)
 
 
 class ProcessingResultResponse(BaseModel):

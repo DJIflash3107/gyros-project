@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
 from app.models.branch import Branch
+from app.models.product import Product
 from app.models.sales_report_submission import SalesReportSubmission
 from app.models.sales_report_staging_row import SalesReportStagingRow
 from app.models.sales_report_observation import SalesReportObservation
@@ -13,6 +14,7 @@ from app.models.schemas.sales_report_submission import (
 )
 from app.helpers.exceptions import NotFoundException, ConflictException, ValidationException
 from app.helpers.pagination import paginate_query
+from app.helpers.logging import logger
 
 
 def create_submission(
@@ -131,6 +133,43 @@ def confirm_submission(
             errors={"status": "Submission is already confirmed"},
         )
 
+    # Check for unactivated draft products/branches referenced by staging rows in this submission
+    draft_products = (
+        db.query(Product)
+        .join(SalesReportStagingRow, SalesReportStagingRow.product_id == Product.id)
+        .filter(
+            SalesReportStagingRow.submission_id == submission.id,
+            SalesReportStagingRow.review_status.in_(["ready", "accepted", "pending_review"]),
+            Product.status == "draft",
+        )
+        .distinct()
+        .all()
+    )
+    if draft_products:
+        draft_names = [f"'{p.name}' (ID {p.id})" for p in draft_products]
+        raise ValidationException(
+            message="Cannot confirm submission with draft products",
+            errors={"products": f"Draft products must be activated before confirming: {', '.join(draft_names)}"},
+        )
+
+    draft_branches = (
+        db.query(Branch)
+        .join(SalesReportStagingRow, SalesReportStagingRow.branch_id == Branch.id)
+        .filter(
+            SalesReportStagingRow.submission_id == submission.id,
+            SalesReportStagingRow.review_status.in_(["ready", "accepted", "pending_review"]),
+            Branch.status == "draft",
+        )
+        .distinct()
+        .all()
+    )
+    if draft_branches:
+        draft_names = [f"'{b.name}' (ID {b.id})" for b in draft_branches]
+        raise ValidationException(
+            message="Cannot confirm submission with draft branches",
+            errors={"branches": f"Draft branches must be activated before confirming: {', '.join(draft_names)}"},
+        )
+
     staging_rows = db.query(SalesReportStagingRow).filter(
         SalesReportStagingRow.submission_id == submission.id
     ).all()
@@ -209,6 +248,76 @@ def confirm_submission(
     submission.confirmed_at = now
     submission.completed_at = now
 
+    # Cleanup orphan drafts that were auto-created but not used / unreferenced
+    cleanup_result = _cleanup_orphan_drafts(db, submission.id, business_id)
+    logger.info(
+        f"Orphan draft cleanup for submission {submission.id}: "
+        f"{cleanup_result['products_deleted']} products, "
+        f"{cleanup_result['branches_deleted']} branches deleted"
+    )
+
     db.commit()
     db.refresh(submission)
     return submission
+
+
+def _cleanup_orphan_drafts(db: Session, submission_id: int, business_id: int) -> Dict[str, int]:
+    """
+    Delete draft Products/Branches for this business that were auto-created
+    but are no longer referenced by any active/pending staging row across all submissions.
+    Returns counts: {"products_deleted": N, "branches_deleted": N}.
+    """
+    draft_products = (
+        db.query(Product)
+        .filter(
+            Product.business_id == business_id,
+            Product.status == "draft",
+        )
+        .all()
+    )
+
+    products_deleted = 0
+    for dp in draft_products:
+        # Check if ANY unconfirmed / non-rejected staging row still references this draft
+        ref_count = (
+            db.query(SalesReportStagingRow)
+            .join(SalesReportSubmission, SalesReportStagingRow.submission_id == SalesReportSubmission.id)
+            .filter(
+                SalesReportStagingRow.product_id == dp.id,
+                SalesReportSubmission.status != "confirmed",
+                SalesReportStagingRow.review_status != "rejected",
+            )
+            .count()
+        )
+        if ref_count == 0:
+            db.delete(dp)
+            products_deleted += 1
+
+    draft_branches = (
+        db.query(Branch)
+        .filter(
+            Branch.business_id == business_id,
+            Branch.status == "draft",
+        )
+        .all()
+    )
+
+    branches_deleted = 0
+    for db_branch in draft_branches:
+        ref_count = (
+            db.query(SalesReportStagingRow)
+            .join(SalesReportSubmission, SalesReportStagingRow.submission_id == SalesReportSubmission.id)
+            .filter(
+                SalesReportStagingRow.branch_id == db_branch.id,
+                SalesReportSubmission.status != "confirmed",
+                SalesReportStagingRow.review_status != "rejected",
+            )
+            .count()
+        )
+        if ref_count == 0:
+            db.delete(db_branch)
+            branches_deleted += 1
+
+    db.flush()
+    return {"products_deleted": products_deleted, "branches_deleted": branches_deleted}
+

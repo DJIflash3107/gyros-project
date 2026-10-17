@@ -614,6 +614,8 @@ Each log line automatically includes the `request_id` (correlation ID) set by
     - `RPT-VAL-008`: Cross-submission overlap with existing active observation (warning)
     - `RPT-VAL-009`: Stock balance inconsistency (info)
     - `RPT-VAL-010`: Revenue plausibility warning (info)
+    - `RPT-VAL-011`: Draft product auto-created (warning)
+    - `RPT-VAL-012`: Draft branch auto-created (warning)
 - `generate_error_code()` produces random `ERR-XXXXX` codes for unexpected errors.
 - Set `error_code_var` when you want the code to appear in the log line:
 
@@ -992,24 +994,26 @@ spreadsheet_parser.py            │                           │
 |---|---|---|---|
 | `spreadsheet` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`.xlsx`, `.xls`, `.csv`) | Max 10 MB. SHA-256 duplicate detection. Automatically profiles layout and performs LLM semantic mapping. |
 | `form` (batch) | `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` | `application/json` (`ManualFormBatchCreate`) | 1 to 500 rows per batch. Direct DB staging with product alias resolution and full validation. |
-| `photo` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`image/jpeg`, `image/png`, `image/webp`) | Max 5 MB. Requires vision-capable AMD model. Always streams real-time SSE progress events. |
+| `photo` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`image/jpeg`, `image/png`, `image/webp`) | Max 5 MB per image. Supports single file (`file`) or up to 10 image files (`files`). Preserves `source_image_index` and `source_image_name`. Requires vision-capable AMD model. Streams real-time SSE progress events. |
 
 ### Core Safety Invariants
 
 1. **Staging-Only Invariant:** Extraction outputs are **ALWAYS** stored as `SalesReportStagingRow`. Raw inputs are never converted directly into `SalesReportObservation`.
 2. **Never Auto-Confirm OCR/Vision Data:** Vision-extracted rows are forced to `review_status="pending_review"` regardless of score to mandate human verification.
 3. **Strict Human Confirmation:** Staging rows become confirmed observations only via an explicit authenticated call to `POST .../sales_report_submissions/{submission_id}/confirm`.
-4. **Needs Correction Exclusion:** Rows with `review_status="needs_correction"` are skipped and excluded from observation creation during confirmation.
-5. **Atomic Finalization:** Confirmation executes in a single database transaction. If any observation fails constraint validation, the entire transaction rolls back.
-6. **SHA-256 De-duplication:** Submissions compute SHA-256 digests of uploaded files to block duplicate ingestion of active submissions.
-7. **Cross-Submission Overlap Protection:** The validation engine compares proposed staging periods against confirmed `SalesReportObservation` records to prevent double-counting.
+4. **Draft Entity Guard:** Submissions cannot be confirmed if any staging row references a `Product` or `Branch` in `draft` status (returns 422 with draft names and IDs).
+5. **Needs Correction Exclusion:** Rows with `review_status="needs_correction"` are skipped and excluded from observation creation during confirmation.
+6. **Atomic Finalization:** Confirmation executes in a single database transaction. If any observation fails constraint validation, the entire transaction rolls back.
+7. **Orphan Draft Cleanup:** Upon successful confirmation, any unreferenced draft products or branches auto-created during this submission are automatically deleted.
+8. **SHA-256 De-duplication:** Submissions compute SHA-256 digests of uploaded files to block duplicate ingestion of active submissions.
+9. **Cross-Submission Overlap Protection:** The validation engine compares proposed staging periods against confirmed `SalesReportObservation` records to prevent double-counting.
 
 ### Centralized Validation Engine (`validation_engine.py`)
 
-Validation executes 10 sequential checks on all rows across all channels:
+Validation executes 12 sequential checks on all rows across all channels:
 
-1. `RPT-VAL-001` (Error): **Product resolution** — Resolves `raw_product_name` against exact active products, then case-insensitive `ProductAlias` mappings.
-2. `RPT-VAL-002` (Error): **Branch existence** — Validates that `branch_id` belongs to the target business and is active.
+1. `RPT-VAL-001` (Error): **Product resolution** — Resolves `raw_product_name` against exact active products, then case-insensitive `ProductAlias` mappings. Only emitted when product cannot be resolved and cannot be auto-created as draft (e.g. empty name).
+2. `RPT-VAL-002` (Error): **Branch existence** — Validates that `branch_id` belongs to the target business and is active. Only emitted when branch cannot be resolved and cannot be auto-created as draft.
 3. `RPT-VAL-003` (Error): **Date validity** — Ensures `period_start <= period_end` and dates are valid.
 4. `RPT-VAL-004` (Warning): **Coverage window** — Verifies row dates lie within submission `coverage_start` and `coverage_end`.
 5. `RPT-VAL-005` (Warning): **Granularity match** — Confirms `granularity` matches `report_period_type` or period span.
@@ -1018,12 +1022,14 @@ Validation executes 10 sequential checks on all rows across all channels:
 8. `RPT-VAL-008` (Warning): **Cross-submission overlap** — Checks if an active `SalesReportObservation` already covers the same entity and period.
 9. `RPT-VAL-009` (Info): **Stock balance consistency** — Compares `opening_stock + received` against `available_stock`.
 10. `RPT-VAL-010` (Info): **Revenue plausibility** — Flags rows with recorded revenue when `sold_qty == 0`.
+11. `RPT-VAL-011` (Warning): **Draft product auto-created** — Flags auto-created draft product requiring activation and lists missing fields. Staging row marked `pending_review`.
+12. `RPT-VAL-012` (Warning): **Draft branch auto-created** — Flags auto-created draft branch requiring activation and lists missing fields. Staging row marked `pending_review`.
 
 ### Review Status Assignment
 
 - `ready` — All validations pass with zero issues. Eligible for one-click confirmation.
-- `pending_review` — Contains warnings, info notices, or originated from vision/OCR. Eligible for confirmation after user inspection.
-- `needs_correction` — Contains one or more error-level issues (e.g., unresolved product, invalid branch). Blocked from confirmation until corrected.
+- `pending_review` — Contains warnings, info notices, auto-created draft entities (`RPT-VAL-011`, `RPT-VAL-012`), or originated from vision/OCR. Eligible for confirmation after user inspection and draft activation.
+- `needs_correction` — Contains one or more error-level issues (e.g., empty product name, invalid date, negative quantity). Blocked from confirmation until corrected.
 
 ### SSE Progress Streaming (Photo Ingestion)
 
@@ -1041,9 +1047,9 @@ Terminal event: `data: [DONE]\n\n`.
 
 | Method | Path | Auth / Role | Description |
 |---|---|---|---|
-| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/process` | Member | Process spreadsheet or photo input. |
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/process` | Member | Process spreadsheet or photo input. Supports `file` or `files` (up to 10 images). |
 | `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/batch_form` | Member | Batch manual form submission (up to 500 rows). |
-| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}/confirm` | Owner / Admin / Manager | Confirms staging rows into observations. |
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}/confirm` | Owner / Admin / Manager | Confirms staging rows into observations. Cleans up orphan drafts. |
 | `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions` | Member | List submissions with pagination and status filter. |
 | `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Member | Get submission details and processing summary. |
 | `PATCH` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Owner / Admin / Manager | Update submission metadata or review note. |
@@ -1056,6 +1062,10 @@ Terminal event: `data: [DONE]\n\n`.
 | `DELETE` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/{row_id}` | Member | Delete individual staging row. |
 | `GET` | `/api/v1/businesses/{b_id}/sales_report_observations` | Member | Query confirmed observations (analytics / BI). |
 | `GET` | `/api/v1/sales_report_submissions/{s_id}/import_issues` | Member | Query extraction and validation issues. |
+| `GET` | `/api/v1/businesses/{b_id}/products?status=active|draft|all` | Member | List products with optional status filter (defaults to `active`). |
+| `POST` | `/api/v1/businesses/{b_id}/products/{p_id}/activate` | Owner / Admin / Manager | Activate draft product with required fields (`base_unit`, `sku`, etc.). |
+| `GET` | `/api/v1/businesses/{b_id}/branches?status=active|draft|all` | Member | List branches with optional status filter (defaults to `active`). |
+| `POST` | `/api/v1/businesses/{b_id}/branches/{branch_id}/activate` | Owner / Admin / Manager | Activate draft branch with required fields (`branch_code`, `address`, etc.). |
 
 ### Bulk Staging Row Review & Update
 
@@ -1082,12 +1092,35 @@ To allow fast operator reviews without editing rows one by one, the API provides
 }
 ```
 
-### Master Data Resolution Invariant
+### Master Data Auto-Creation & Draft Review Workflow (Feature A)
 
-During ingestion, the pipeline **NEVER automatically creates new Product or Branch records** in the master tables:
-1. If a product cannot be resolved by ID, exact name, case-insensitive name, or alias, `RPT-VAL-001` (Severity: `error`) is emitted, and the row enters staging with `product_id=None` and `review_status="needs_correction"`.
-2. If a branch ID is missing, inactive, or belongs to another business, `RPT-VAL-002` (Severity: `error`) is emitted, and the row enters staging with `branch_id=None` and `review_status="needs_correction"`.
-3. During confirmation (`/confirm`), rows lacking `product_id` or `branch_id` are strictly rejected and blocked from observation conversion until the operator creates the master entity or alias and updates the staging row.
+During ingestion (spreadsheet, batch form, or multi-photo), if a product or branch from the report does not yet exist in the database:
+
+1. **Automatic Draft Entity Creation:**
+   - Missing products are created with `status="draft"`, `is_active=False`, `auto_created_from="<raw_name>"`, and default fallback values.
+   - Missing branches are created with `status="draft"`, `is_active=False`, `auto_created_from="<raw_name>"`, and default fallback values.
+   - Re-used within the same ingestion run to avoid duplicate draft creation.
+2. **Review Warnings & Staging Flag:**
+   - Emits `RPT-VAL-011` (Draft Product Created) or `RPT-VAL-012` (Draft Branch Created) detailing which fields must be completed.
+   - Staging rows referencing drafts are tagged with `review_status="pending_review"`.
+   - The ingestion `summary` includes `auto_created_products` and `auto_created_branches` lists for immediate UI review prompts.
+3. **Draft Isolation:**
+   - Draft products and branches are hidden from default query listings (`?status=active` by default). Operators inspect them via `?status=draft`.
+4. **User Review & Activation:**
+   - `POST /api/v1/businesses/{b_id}/products/{p_id}/activate`: Supply missing required fields (`base_unit`, `sku`, etc.) to transition the product to `active`.
+   - `POST /api/v1/businesses/{b_id}/branches/{b_id}/activate`: Supply missing required fields (`branch_code`, `address`, etc.) to transition the branch to `active`.
+5. **Confirmation Blocking Guard:**
+   - `POST .../sales_report_submissions/{submission_id}/confirm` enforces that **NO staging row references an unactivated draft entity**. If any unactivated draft remains, the request is rejected with `422 Unprocessable Entity`, naming all blocking draft entities and IDs.
+6. **Orphan Draft Cleanup:**
+   - If an auto-created draft is replaced or unreferenced before confirmation (e.g. user pointed staging rows to an existing master product, or deleted staging rows), confirming the submission automatically detects and deletes the orphan draft records from the database, preventing leftover draft pollution.
+
+### Multi-Photo Ingestion (Feature B)
+
+- Allows submitting multiple report images in a single ingestion request using the `files` multipart form field (up to `VISION_MAX_IMAGES_PER_SUBMISSION = 10`), while maintaining full backward compatibility for single `file` uploads.
+- Each image is extracted independently through the AMD Vision pipeline.
+- Staging rows track their originating photo via `source_image_index` (1-indexed) and `source_image_name` (e.g. `receipt_p1.jpg`).
+- Extracted rows across all photos are aggregated into a single unified `SalesReportSubmission`.
+- Real-time SSE progress events indicate multi-photo progress during extraction.
 
 ---
 

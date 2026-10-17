@@ -284,8 +284,10 @@ def test_spreadsheet_unresolvable_product(client, auth_user):
     )
     assert resp.status_code == 201
     body = resp.json()["data"]
-    assert body["summary"]["needs_correction_rows"] == 1
-    assert any(i["issue_code"] == "RPT-VAL-001" for i in body["issues"])
+    assert body["summary"]["pending_review_rows"] == 1
+    assert any(i["issue_code"] == "RPT-VAL-011" for i in body["issues"])
+    assert len(body["summary"]["auto_created_products"]) == 1
+    assert body["summary"]["auto_created_products"][0]["name"] == "Unknown Mystery Product XYZ"
 
 
 # 9. test_spreadsheet_partial_parse_errors
@@ -297,7 +299,7 @@ def test_spreadsheet_partial_parse_errors(client, auth_user):
         headers=["Product", "Branch ID", "Period Start", "Period End", "Granularity", "Sold Qty"],
         rows=[
             ["Beef Gyros", branch_id, "2026-10-01", "2026-10-01", "daily", 10],
-            ["Ghost Item", branch_id, "2026-10-01", "2026-10-01", "daily", 5],
+            ["", branch_id, "2026-10-01", "2026-10-01", "daily", 5],
         ],
     )
 
@@ -318,6 +320,7 @@ def test_spreadsheet_partial_parse_errors(client, auth_user):
     assert body["summary"]["total_rows"] == 2
     assert body["summary"]["ready_rows"] == 1
     assert body["summary"]["needs_correction_rows"] == 1
+    assert any(i["issue_code"] == "RPT-VAL-001" for i in body["issues"])
 
 
 # 10. test_batch_form_happy_path
@@ -766,7 +769,7 @@ def test_confirm_rejects_unresolved_rows(client, auth_user):
         headers=["Product", "Branch ID", "Period Start", "Period End", "Granularity", "Sold Qty", "Recorded Revenue"],
         rows=[
             ["Beef Gyros", branch_id, "2026-10-01", "2026-10-01", "daily", 10, 500000],
-            ["Unresolvable Food Item", branch_id, "2026-10-02", "2026-10-02", "daily", 8, 400000],
+            ["", branch_id, "2026-10-02", "2026-10-02", "daily", 8, 400000],
         ],
     )
     resp = client.post(

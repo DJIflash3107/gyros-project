@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # Vision Configuration
     VISION_MODEL_OVERRIDE: str = ""
     VISION_MAX_IMAGE_SIZE_MB: int = 5
+    VISION_MAX_IMAGES_PER_SUBMISSION: int = 10
     VISION_EXTRACTION_TEMPERATURE: float = 0.1
 
     # Semantic Mapping Configuration

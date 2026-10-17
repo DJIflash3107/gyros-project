@@ -23,6 +23,7 @@ COLUMN_MAPPING = {
     "id_produk": "product_id",
     # Branch
     "branch": "branch_id",
+    "branch_name": "branch_id",
     "branch_id": "branch_id",
     "id_cabang": "branch_id",
     "cabang": "branch_id",

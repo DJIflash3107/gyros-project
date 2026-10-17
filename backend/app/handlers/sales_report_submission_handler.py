@@ -1,5 +1,6 @@
+import hashlib
 from datetime import date
-from typing import Optional, Union
+from typing import Optional, Union, List, Tuple
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
@@ -97,7 +98,7 @@ def confirm_submission_handler(
 
 async def process_submission_handler(
     business_id: int,
-    file: UploadFile,
+    files: List[UploadFile],
     input_method: str,
     report_period_type: str,
     coverage_start: date,
@@ -113,11 +114,18 @@ async def process_submission_handler(
             message="Request validation failed",
         )
 
-    file_bytes = await file.read()
-    file_name = file.filename or "upload"
-    mime_type = file.content_type or "application/octet-stream"
+    if not files:
+        raise ValidationException(
+            errors={"file": "At least one file is required"},
+            message="No upload file provided",
+        )
 
     if input_method == "spreadsheet":
+        primary_file = files[0]
+        file_bytes = await primary_file.read()
+        file_name = primary_file.filename or "upload"
+        mime_type = primary_file.content_type or "application/octet-stream"
+
         result = sales_report_processing_service.process_file_submission(
             db=db,
             business_id=business_id,
@@ -138,27 +146,43 @@ async def process_submission_handler(
         )
 
     elif input_method == "photo":
-        # Pre-validate vision requirements before streaming
-        max_img_bytes = settings.VISION_MAX_IMAGE_SIZE_MB * 1024 * 1024
-        if len(file_bytes) > max_img_bytes:
+        if len(files) > settings.VISION_MAX_IMAGES_PER_SUBMISSION:
             raise ValidationException(
                 errors={
-                    "file": f"Image exceeds maximum size limit of {settings.VISION_MAX_IMAGE_SIZE_MB}MB",
-                    "error_code": ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
+                    "files": f"Maximum {settings.VISION_MAX_IMAGES_PER_SUBMISSION} images per submission (received {len(files)})"
                 },
-                message="Image exceeds size limit",
-                error_code=ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
+                message="Too many images",
             )
 
-        if not (mime_type.startswith("image/") or any(file_name.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp"))):
-            raise ValidationException(
-                errors={
-                    "file": "Photo input method requires an image file (JPEG, PNG, WEBP)",
-                    "error_code": ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
-                },
-                message="Unsupported file format",
-                error_code=ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
-            )
+        max_img_bytes = settings.VISION_MAX_IMAGE_SIZE_MB * 1024 * 1024
+        images: List[Tuple[bytes, str, str]] = []
+
+        for idx, f in enumerate(files, start=1):
+            f_bytes = await f.read()
+            f_name = f.filename or f"image_{idx}.jpg"
+            f_mime = f.content_type or "image/jpeg"
+
+            if len(f_bytes) > max_img_bytes:
+                raise ValidationException(
+                    errors={
+                        "file": f"Image '{f_name}' exceeds maximum size limit of {settings.VISION_MAX_IMAGE_SIZE_MB}MB",
+                        "error_code": ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
+                    },
+                    message="Image exceeds size limit",
+                    error_code=ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
+                )
+
+            if not (f_mime.startswith("image/") or any(f_name.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp"))):
+                raise ValidationException(
+                    errors={
+                        "file": f"File '{f_name}' is not a supported image format (JPEG, PNG, WEBP)",
+                        "error_code": ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
+                    },
+                    message="Unsupported file format",
+                    error_code=ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
+                )
+
+            images.append((f_bytes, f_name, f_mime))
 
         # Check AI configuration and vision model availability
         if not settings.AMD_API_KEY and settings.APP_ENV not in ("testing", "test"):
@@ -195,20 +219,20 @@ async def process_submission_handler(
                     error_code=ErrorCodeRegistry.RPT_VISION_UNAVAILABLE,
                 )
 
-        # Check duplicate file before streaming
-        sha256_hex = sales_report_processing_service.compute_sha256(file_bytes)
+        # Check duplicate file/submission before processing
+        combined_hash = hashlib.sha256()
+        for img_bytes, _, _ in images:
+            combined_hash.update(hashlib.sha256(img_bytes).digest())
+        sha256_hex = combined_hash.hexdigest()
         sales_report_processing_service.check_duplicate_submission(db, business_id, sha256_hex)
 
         # If stream is explicitly False, process synchronously and return JSON
         if stream is False:
-            result = sales_report_processing_service.process_file_submission(
+            result = sales_report_processing_service.process_multi_photo_submission(
                 db=db,
                 business_id=business_id,
                 current_user=current_user,
-                file_bytes=file_bytes,
-                file_name=file_name,
-                mime_type=mime_type,
-                input_method="photo",
+                images=images,
                 report_period_type=report_period_type,
                 coverage_start=coverage_start,
                 coverage_end=coverage_end,
@@ -221,13 +245,11 @@ async def process_submission_handler(
             )
 
         # Otherwise, stream SSE progress
-        generator = sales_report_processing_service.process_photo_submission_stream(
+        generator = sales_report_processing_service.process_multi_photo_submission_stream(
             db=db,
             business_id=business_id,
             current_user=current_user,
-            image_bytes=file_bytes,
-            file_name=file_name,
-            mime_type=mime_type,
+            images=images,
             report_period_type=report_period_type,
             coverage_start=coverage_start,
             coverage_end=coverage_end,

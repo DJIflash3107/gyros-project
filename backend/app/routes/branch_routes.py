@@ -2,7 +2,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.configs.database import get_db
-from app.models.schemas.branch import BranchCreate, BranchUpdate
+from app.models.schemas.branch import BranchCreate, BranchUpdate, BranchActivate
 from app.models.schemas.pagination import PaginationParams
 from app.middlewares.auth import require_business_membership
 from app.handlers import branch_handler
@@ -26,12 +26,23 @@ def create_branch(
 def list_branches(
     business_id: int,
     is_active: Optional[bool] = None,
+    status: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     params = PaginationParams(page=page, page_size=page_size)
-    return branch_handler.list_branches_handler(business_id, is_active, params, db)
+    return branch_handler.list_branches_handler(business_id, is_active, status, params, db)
+
+
+@router.post("/{branch_id}/activate", dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+def activate_branch(
+    business_id: int,
+    branch_id: int,
+    data: BranchActivate,
+    db: Session = Depends(get_db),
+):
+    return branch_handler.activate_branch_handler(business_id, branch_id, data, db)
 
 
 @router.get("/{branch_id}", dependencies=[Depends(require_business_membership())])
