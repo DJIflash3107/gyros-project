@@ -32,6 +32,7 @@ Read it fully before modifying any code.
 23. [Dynamic Profiling & LLM Semantic Mapping](#23-dynamic-profiling--llm-semantic-mapping)
 24. [Multi-Sheet Workbook Processing](#24-multi-sheet-workbook-processing)
 25. [Demand Forecasting Service](#25-demand-forecasting-service)
+26. [Business Action Center](#26-business-action-center)
 
 ---
 
@@ -85,6 +86,7 @@ backend/
 │   ├── handlers/
 │   │   ├── agent_handler.py                  # Agent streaming chat handler (SSE StreamingResponse)
 │   │   ├── ai_handler.py                     # AI endpoints handler (models, health, completions)
+│   │   ├── business_action_handler.py        # Business action recommendation & status handlers
 │   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
 │   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates (including bulk)
 │   │   ├── sales_report_observation_handler.py# Confirmed sales observation queries
@@ -93,7 +95,7 @@ backend/
 │   │   ├── product_alias_handler.py          # Product alias management
 │   │   └── <entity>_handler.py               # HTTP-layer functions (request → response)
 │   ├── helpers/
-│   │   ├── error_codes.py    # ErrorCodeRegistry (standard, AI, agent, report processing, forecasting)
+│   │   ├── error_codes.py    # ErrorCodeRegistry (standard, AI, agent, report processing, forecasting, BAC)
 │   │   ├── exceptions.py     # AppException hierarchy (includes AIServiceException, etc.)
 │   │   ├── logging.py        # setup_logging(), logger, request_id_var, error_code_var
 │   │   ├── pagination.py     # paginate() helper
@@ -104,6 +106,7 @@ backend/
 │   ├── models/
 │   │   ├── __init__.py       # Imports all ORM models so Alembic can discover them
 │   │   ├── types.py          # BigIntId, IntUnsigned — dialect-aware column types
+│   │   ├── business_action.py           # Persisted recommendations and lifecycle status
 │   │   ├── sales_report_submission.py   # Ingestion submissions (status, sha256, counters)
 │   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, review status, source sheet)
 │   │   ├── sales_report_observation.py  # Confirmed observations (unique business/branch/product/period)
@@ -115,6 +118,7 @@ backend/
 │   ├── models/schemas/
 │   │   ├── agent.py                  # Pydantic schemas for SSE events and chat request
 │   │   ├── ai.py                     # Pydantic schemas for AI models, health, and chat
+│   │   ├── business_action.py        # GenerateActionsRequest, UpdateActionStatus, Response
 │   │   ├── sales_report_processing.py # ManualFormBatchCreate, ProcessingResultResponse, SSE schemas
 │   │   ├── sales_report_submission.py # Submission Create/Update/Response
 │   │   ├── sales_report_staging_row.py# Staging row Create/Update/BulkUpdate/Response
@@ -127,6 +131,7 @@ backend/
 │   │   ├── __init__.py                   # Re-exports all routers
 │   │   ├── agent_routes.py               # /api/v1/agent routes (POST chat)
 │   │   ├── ai_routes.py                  # /api/v1/ai routes (models, health, chat)
+│   │   ├── business_action_routes.py     # /api/v1/businesses/{id}/business-actions & direct routes
 │   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
 │   │   ├── sales_report_staging_row_routes.py# Staging rows CRUD and /bulk update
 │   │   ├── sales_report_observation_routes.py
@@ -135,8 +140,11 @@ backend/
 │   │   ├── product_alias_routes.py
 │   │   └── <entity>_routes.py            # APIRouter + path declarations
 │   ├── services/
+│   │   ├── action_narrative_generator.py     # Dynamic AI narrative generation (English prompts, JSON schema)
 │   │   ├── agent_service.py                  # LangGraph astream_events orchestration & SSE streaming
 │   │   ├── ai_service.py                     # AI discovery, capability inference, chat logic
+│   │   ├── business_action_engine.py         # Pure deterministic recommendation engine (10 rules)
+│   │   ├── business_action_service.py        # BAC orchestration, deduplication, persistence & ephemeral mode
 │   │   ├── sales_report_processing_service.py # Orchestrator: spreadsheet/photo/form -> staging
 │   │   ├── input_profiler.py                 # Structural profiler (headers, types, sample data, merged cells)
 │   │   ├── semantic_mapper.py                # LLM-based column-to-canonical schema mapping & sheet role classifier
@@ -616,6 +624,11 @@ Each log line automatically includes the `request_id` (correlation ID) set by
     - `RPT-VAL-010`: Revenue plausibility warning (info)
     - `RPT-VAL-011`: Draft product auto-created (warning)
     - `RPT-VAL-012`: Draft branch auto-created (warning)
+  - Business Action Center:
+    - `ERR-BAC-001`: Action recommendation not found
+    - `ERR-BAC-002`: Invalid status transition
+    - `ERR-BAC-003`: Dismissal reason required when status='dismissed'
+    - `ERR-BAC-004`: Invalid filter parameter
 - `generate_error_code()` produces random `ERR-XXXXX` codes for unexpected errors.
 - Set `error_code_var` when you want the code to appear in the log line:
 
@@ -874,8 +887,8 @@ agent_tools.py ─────────────────────�
   ├── sales_analytics ───────────────────── Aggregates sales observations and revenue
   ├── expense_summary ───────────────────── Aggregates expenses by category
   ├── product_catalog ───────────────────── Queries product catalog and status
-  ├── invoke_forecasting ────────────────── Stub (future forecasting service)
-  ├── invoke_action_center ──────────────── Stub (future Business Action Center)
+  ├── invoke_forecasting ────────────────── Generates statistical forecasts via forecasting_service
+  ├── invoke_action_center ──────────────── Generates ranked operational recommendations via BAC
   ├── invoke_promotion_planner ──────────── Stub (future Promotion Planner)
   └── invoke_artifact_service ───────────── Stub (future artifact generator)
 ```
@@ -1288,4 +1301,110 @@ Backtesting splits historical observations into training and test sets in chrono
 | `GET` | `/api/v1/businesses/{b_id}/forecasting/sufficiency` | Member | Check if sufficient observation history exists for forecasting. |
 | `GET` | `/api/v1/businesses/{b_id}/forecasting/runs` | Member | List past forecast runs with pagination and status filters. |
 | `GET` | `/api/v1/businesses/{b_id}/forecasting/runs/{run_id}` | Member | Retrieve a specific forecast run with all period predicted points. |
+
+---
+
+## 26. Business Action Center
+
+The Business Action Center (BAC) is an operational recommendation service that bridges analytical data (sales observations, inventory/disposition, expenses, and demand forecasts) into ranked, high-value, actionable recommendations for business operators.
+
+### Architecture & Data Flow
+
+```
+Client / Business Operations Agent
+      │
+      ▼
+business_action_routes.py (/api/v1/businesses/{b_id}/business-actions & /api/v1/business-actions)
+      │
+      ▼
+business_action_handler.py (Request unpacking & standardized response format)
+      │
+      ▼
+business_action_service.py (Data aggregation, engine evaluation, AI narrative enrichment, persistence)
+      │
+      ├──────────────────────────────┬───────────────────────────────┐
+      ▼                              ▼                               ▼
+business_action_engine.py      action_narrative_generator.py    Database (MySQL / SQLite)
+(Pure deterministic engine:    (Async LLM enrichment:           └── business_actions
+ 10 rules + cross-validation    6 narrative fields, English,         (Persisted actions &
+ & systemic branch modifiers)   structured JSON, no fallback)         lifecycle tracking)
+```
+
+| Component | File | Responsibility |
+|---|---|---|
+| Engine | `app/services/business_action_engine.py` | Pure deterministic rule evaluation (Inventory, Sales, Forecasts, Expenses), scoring formula (10–99), and modifiers. Synchronous, stateless, zero network calls. |
+| Narrative Generator | `app/services/action_narrative_generator.py` | Async LLM narrative generator. Enriches candidates with English `title`, `rationale`, `recommended_steps`, `risks`, `success_metrics`, `limitations`. Strict error propagation (no silent fallback). |
+| Service | `app/services/business_action_service.py` | Aggregates multi-tenant data, coordinates engine & narrative generator, handles deduplication, persistence (`persist=True`), and ephemeral previews (`persist=False`). |
+| Handler | `app/handlers/business_action_handler.py` | Async HTTP-layer handlers building standard response envelopes. |
+| Routes | `app/routes/business_action_routes.py` | FastAPI router mounted under `/api/v1/businesses/{business_id}/business-actions` and direct `/api/v1/business-actions`. |
+| Model | `app/models/business_action.py` | SQLAlchemy ORM model for `business_actions` table. |
+| Schemas | `app/models/schemas/business_action.py` | Pydantic schemas: `GenerateActionsRequest`, `UpdateActionStatusRequest`, `BusinessActionResponse`, `GenerateActionsResponse`. |
+
+### Separation of Concerns: Deterministic Engine vs. AI Narrative Generator
+
+To guarantee predictability, auditable math, and operational safety:
+1. **Deterministic Layer (`BusinessActionEngine`)**:
+   - Evaluates pure mathematical criteria, thresholds, volume cutoffs, and cost amounts.
+   - Calculates `priority_score` (Decimal), `urgency` (`critical`, `high`, `medium`, `low`), `expected_impact` (`high`, `medium`, `low`), `evidence_quality` (`measured`, `estimated`, `mixed`), and assigns `rule_label`.
+   - Embeds raw numerical metrics and descriptive names in `supporting_data["context"]`.
+   - Leaves narrative strings (`title`, `rationale`, `recommended_steps`, `risks`, `success_metrics`, `limitations`) as `None`.
+2. **AI Narrative Layer (`ActionNarrativeGenerator`)**:
+   - Takes skeleton candidates from the engine and invokes the LLM via `chat_completion()`.
+   - Uses strict English system prompt and JSON schema.
+   - Fills in dynamic, context-rich narratives referencing exact numbers from `supporting_data`.
+   - Bounded concurrency with `asyncio.Semaphore(5)`.
+   - **No Fallback Policy**: If LLM fails (rate limit, gateway error, unparseable JSON, missing fields), the exception is raised immediately to the caller.
+
+### Deterministic Rule Catalog
+
+| Rule Code | Domain | Rule Label | Trigger Criteria | Default Urgency | Default Impact | Base Score |
+|---|---|---|---|---|---|---|
+| `INV-001` | Inventory | `high_spoilage` | `spoilage_rate > 15%` and `total_spoiled > 5` | `critical` (>30%) / `high` | `high` (>500k IDR loss) / `medium` | 75.0 + min(20, spoilage_rate * 50) |
+| `INV-002` | Inventory | `excess_leftover` | `leftover > 2 * sold`, `sold > 0`, `leftover > 10` | `medium` | `medium` | 55.0 + min(15, ratio * 3) |
+| `INV-003` | Inventory | `high_damage` | `total_damaged > 3`, `damage_rate > 5%` | `high` (>10) / `medium` | `medium` | 60.0 + min(20, damaged * 2) |
+| `SAL-001` | Sales | `zero_sales` | `days >= 14`, `total_sold == 0`, `submissions >= 3` | `low` | `low` | 35.0 (fixed) |
+| `SAL-002` | Sales | `revenue_driver` | Top 20% revenue cutoff or (velocity >= 10/day & sold >= 50) | `medium` | `high` | 65.0 + min(20, velocity * 2) |
+| `FC-001` | Forecasting | `demand_surge` | `is_reliable=True`, `projected_change >= +25%`, `predicted_qty >= 20` | `high` | `high` | 78.0 + min(15, surge * 30) |
+| `FC-002` | Forecasting | `demand_drop` | `is_reliable=True`, `projected_change <= -25%`, `recent_qty >= 20` | `medium` | `medium` | 62.0 + min(15, drop * 25) |
+| `FC-003` | Forecasting | `unreliable_forecast` | `is_reliable=False` or `wape > 40%` | `low` | `low` | 40.0 (fixed) |
+| `EXP-001` | Expenses | `expense_surge` | `growth_rate >= +30%`, `total_amount >= 500,000 IDR` | `high` (>=50%) / `medium` | `high` (>=2M IDR) / `medium` | 70.0 + min(20, growth * 30) |
+| `EXP-002` | Expenses | `expense_concentration` | Total expenses >= 1M IDR, category share >= 40% | `medium` | `high` | 60.0 + min(20, share * 30) |
+
+### Deterministic Modifiers
+
+After all 10 rules evaluate, `_apply_modifiers()` adjusts scores and evidence quality:
+- **Cross-Validation Modifier (+5.00 points, evidence becomes `"mixed"`)**: Applied if the same product triggers both an inventory action (`INV-*`) and a demand forecasting action (`FC-*`).
+- **Systemic Branch Modifier (+3.00 points)**: Applied if a single branch triggers more than 3 critical/high urgency actions across any categories.
+- Final scores are clamped between `10.00` and `99.00` Decimal.
+- Deterministic sorting: `priority_score` DESC, `urgency` DESC, `expected_impact` DESC, `action_type` ASC, `rule_label` ASC.
+
+### Action Status Lifecycle
+
+Recommendations progress through a formal state machine:
+- `open` — Newly generated recommendation awaiting action.
+- `in_progress` — Operator has reviewed and is actively implementing the steps.
+- `implemented` — Corrective steps completed and verified.
+- `dismissed` — Operator declined the recommendation; **requires** `dismissed_reason` string (max 255 chars).
+- `archived` — Historical record superseded or retired.
+
+### Deduplication & Regeneration
+
+When `generate_actions` is invoked with `persist=True`:
+- Queries existing actions for the same `business_id`, `action_type`, `branch_id`, and `product_id` with `status IN ('open', 'in_progress')`.
+- If an existing record exists, it updates the priority score, metrics, and narrative fields in place rather than inserting duplicate records.
+- If no existing open/in-progress action matches, a new `BusinessAction` row is inserted.
+- When `persist=False`, actions are generated, AI-enriched, and returned with ephemeral IDs (1, 2, 3...) with zero database writes.
+
+### Endpoints Reference
+
+| Method | Path | Auth / Role | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/businesses/{b_id}/business-actions/generate` | Owner / Admin / Manager | Generate, AI-enrich, and rank recommendations (`persist=true|false`). |
+| `GET` | `/api/v1/businesses/{b_id}/business-actions` | Member | List actions with filtering (`status`, `category`, `urgency`, etc.) and pagination. |
+| `GET` | `/api/v1/businesses/{b_id}/business-actions/{id}` | Member | Retrieve specific action detail with all narrative fields and metrics. |
+| `PATCH` | `/api/v1/businesses/{b_id}/business-actions/{id}/status` | Owner / Admin / Manager | Update status (`in_progress`, `implemented`, `dismissed`, `archived`). |
+| `POST` | `/api/v1/business-actions/generate` | Owner / Admin / Manager | Direct endpoint to generate recommendations (pass `business_id` in body). |
+| `GET` | `/api/v1/business-actions` | Member | Direct endpoint to list actions (pass `business_id` as query parameter). |
+| `GET` | `/api/v1/business-actions/{id}` | Member | Direct endpoint to get action details. |
+| `PATCH` | `/api/v1/business-actions/{id}/status` | Owner / Admin / Manager | Direct endpoint to update action status. |
 

@@ -51,6 +51,12 @@ from app.models.schemas.forecasting import (
     EvaluationResponse,
     DataSufficiencyResponse,
 )
+from app.models.schemas.business_action import (
+    GenerateActionsRequest,
+    UpdateActionStatusRequest,
+    BusinessActionResponse,
+    GenerateActionsResponse,
+)
 
 
 __all__ = [
@@ -130,5 +136,9 @@ __all__ = [
     "ActualVsPredicted",
     "EvaluationResponse",
     "DataSufficiencyResponse",
+    "GenerateActionsRequest",
+    "UpdateActionStatusRequest",
+    "BusinessActionResponse",
+    "GenerateActionsResponse",
 ]
 

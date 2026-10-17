@@ -29,6 +29,8 @@ from app.routes import (
     agent_router,
     forecasting_router,
     direct_forecasting_router,
+    business_action_router,
+    direct_business_action_router,
 )
 
 from contextlib import asynccontextmanager
@@ -138,3 +140,5 @@ app.include_router(ai_router)
 app.include_router(agent_router)
 app.include_router(forecasting_router)
 app.include_router(direct_forecasting_router)
+app.include_router(business_action_router)
+app.include_router(direct_business_action_router)

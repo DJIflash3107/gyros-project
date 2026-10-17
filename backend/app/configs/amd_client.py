@@ -442,5 +442,9 @@ async def close_amd_client() -> None:
     """Close singleton client if open."""
     global _amd_client_instance
     if _amd_client_instance is not None:
-        await _amd_client_instance.close()
-        _amd_client_instance = None
+        try:
+            await _amd_client_instance.close()
+        except Exception:
+            pass
+        finally:
+            _amd_client_instance = None

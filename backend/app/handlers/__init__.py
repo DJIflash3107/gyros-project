@@ -16,6 +16,7 @@ from app.handlers import (
     ai_handler,
     agent_handler,
     forecasting_handler,
+    business_action_handler,
 )
 
 __all__ = [
@@ -36,5 +37,6 @@ __all__ = [
     "ai_handler",
     "agent_handler",
     "forecasting_handler",
+    "business_action_handler",
 ]
 

@@ -1,6 +1,6 @@
 # Gyros Project — Backend API
 
-A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, an agentic **Business Operations Agent** built with **LangGraph**, a multi-sheet **Sales Report Processing & LLM Semantic Mapping** engine, and a predictive **Demand Forecasting Service**.
+A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, and **Pydantic v2**, featuring multi-tenant business data management (businesses, branches, products, sales reporting, expenses), native AI integration via **AMD Radeon Cloud Token Factory**, an agentic **Business Operations Agent** built with **LangGraph**, a multi-sheet **Sales Report Processing & LLM Semantic Mapping** engine, a predictive **Demand Forecasting Service**, and an intelligent **Business Action Center**.
 
 ---
 
@@ -9,7 +9,14 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
 - **Multi-Tenant Architecture**: Strict tenancy isolation and role-based access control (`owner`, `admin`, `manager`, `member`, `viewer`).
 - **Standardized Response Envelope**: Uniform JSON response shape across all standard endpoints:
   - `{ "message": { "success": "..." }, "error": {}, "data": { ... } }`
-- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`, `ERR-FOR-001`) and correlated `request_id` context in every log record.
+- **Traceable Error Handling**: Centralized exception handling with unique traceable error codes (e.g. `ERR-40001`, `ERR-AI-429`, `ERR-AGT-408`, `ERR-RPT-001`, `ERR-RPT-021`, `ERR-FOR-001`, `ERR-BAC-001`) and correlated `request_id` context in every log record.
+- **Business Action Center**:
+  - Deterministic recommendation engine analyzing operational data across 4 domains: Inventory (spoilage, leftover, damage), Sales (zero-sales dead items, high-volume revenue drivers), Demand Forecasting (demand surges, demand drops, model unreliability), and Expenses (category surges, cost concentration).
+  - Explicit scoring formula based on urgency, expected impact, priority score (10–99), and deterministic modifiers (cross-validation between inventory and forecasting, systemic multi-issue branches).
+  - **Dynamic AI-Generated Narratives**: Refactored to dynamically generate 6 narrative fields (`title`, `rationale`, `recommended_steps`, `risks`, `success_metrics`, `limitations`) via LLM in fluent, professional English with strictly no silent fallbacks.
+  - **Action Status Lifecycle**: Supports tracking recommendations through `open`, `in_progress`, `implemented`, `dismissed` (with reason), and `archived`.
+  - **Deduplication & Ephemeral Mode**: Deduplicates existing open actions on re-generation, or runs in preview/ephemeral mode (`persist=false`) without database writes.
+  - Native integration with the Business Operations Agent via the `invoke_action_center` tool.
 - **Sales Report Processing & Staging Workflow**:
   - Multi-channel ingestion supporting **Spreadsheets** (`.xlsx`, `.xls`, `.csv`), **Batch Manual Forms** (up to 500 rows), and **Sales-record Photos / Receipts** (vision OCR).
   - **Multi-Photo Ingestion**: Ingest multiple receipt/sales photos in a single request (up to 10 images via `files`), preserving `source_image_index` and `source_image_name` on staging rows, merged into a unified submission. Full backward compatibility with single `file`.
@@ -37,7 +44,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Real-time conversational AI assistant powered by a LangGraph `StateGraph` workflow.
   - Genuine token-by-token and lifecycle streaming over Server-Sent Events (SSE) via `POST /api/v1/agent/businesses/{business_id}/chat`.
   - 7 structured SSE event types: `agent_status`, `tool_start`, `tool_result`, `message_delta`, `approval_required`, `agent_error`, `agent_complete`.
-  - 8 read-only operational tools: `business_summary`, `sales_analytics`, `expense_summary`, `product_catalog`, plus stubs for `invoke_forecasting`, `invoke_action_center`, `invoke_promotion_planner`, and `invoke_artifact_service`.
+  - 8 operational tools: `business_summary`, `sales_analytics`, `expense_summary`, `product_catalog`, `invoke_forecasting`, `invoke_action_center`, plus stubs for `invoke_promotion_planner`, and `invoke_artifact_service`.
   - Security guardrails: zero database writes, strict cross-tenant filtering by `business_id`, chain-of-thought `<think>` block sanitization, and request timeouts.
 - **AMD Token Factory AI Integration**:
   - Runtime model discovery (`GET /api/v1/ai/models`) with capability flags (streaming, vision, reasoning, tool calling).
@@ -47,7 +54,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Graceful degradation: server boots normally without API credentials.
   - Zero placeholder output policy: errors are raised explicitly and traceably.
 - **Database Migrations**: Managed schema versions using **Alembic**.
-- **Automated Testing**: 152 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
+- **Automated Testing**: 187 unit and integration tests executing against isolated in-memory SQLite (no external MySQL server required for CI/testing).
 
 ---
 
@@ -86,6 +93,7 @@ backend/
 │   ├── handlers/             # HTTP-layer request unpackers & response formatters
 │   │   ├── agent_handler.py                  # Agent SSE streaming chat handler
 │   │   ├── ai_handler.py                     # AI discovery & completion handlers
+│   │   ├── business_action_handler.py        # Business action recommendation & status handlers
 │   │   ├── sales_report_submission_handler.py # Process, batch form, confirm & CRUD handlers
 │   │   ├── sales_report_staging_row_handler.py# Staging row review & status updates (including bulk)
 │   │   ├── sales_report_observation_handler.py# Confirmed sales observation queries
@@ -96,6 +104,7 @@ backend/
 │   ├── helpers/              # Logging, exceptions, error codes, response builders
 │   ├── middlewares/          # RequestContextMiddleware & auth dependency guards
 │   ├── models/               # SQLAlchemy ORM models & Pydantic schemas
+│   │   ├── business_action.py           # Persisted recommendations and lifecycle status
 │   │   ├── sales_report_submission.py   # Ingestion submissions
 │   │   ├── sales_report_staging_row.py  # Staging rows (never auto-finalized, source_sheet_name)
 │   │   ├── sales_report_observation.py  # Confirmed observations
@@ -106,6 +115,7 @@ backend/
 │   │   └── schemas/          # Input/output schemas (BaseModel)
 │   │       ├── agent.py                  # SSE event & chat request schemas
 │   │       ├── ai.py                     # AI provider schemas
+│   │       ├── business_action.py        # GenerateActionsRequest, UpdateActionStatus, Response
 │   │       ├── sales_report_processing.py # Batch form, process response & SSE schemas
 │   │       ├── sales_report_submission.py # Submissions schemas
 │   │       ├── sales_report_staging_row.py# Staging schemas (Create/Update/BulkUpdate/Response)
@@ -115,6 +125,7 @@ backend/
 │   ├── routes/               # FastAPI APIRouter endpoints mounted under /api/v1/
 │   │   ├── agent_routes.py               # Agent chat endpoint
 │   │   ├── ai_routes.py                  # AI discovery & completion endpoints
+│   │   ├── business_action_routes.py     # Business Action Center routes (/generate, status, filters)
 │   │   ├── sales_report_submission_routes.py # /process, /batch_form, /{id}/confirm, CRUD
 │   │   ├── sales_report_staging_row_routes.py# Staging rows CRUD and /bulk update
 │   │   ├── sales_report_observation_routes.py
@@ -123,8 +134,11 @@ backend/
 │   │   ├── product_alias_routes.py
 │   │   └── <entity>_routes.py
 │   ├── services/             # Business logic and external service interactions
+│   │   ├── action_narrative_generator.py     # Dynamic AI narrative generation (English prompts, JSON schema)
 │   │   ├── agent_service.py                  # LangGraph astream_events orchestration
 │   │   ├── ai_service.py                     # AMD AI service orchestration
+│   │   ├── business_action_engine.py         # Deterministic multi-domain recommendation engine (10 rules)
+│   │   ├── business_action_service.py        # BAC orchestration, deduplication, persistence & ephemeral mode
 │   │   ├── sales_report_processing_service.py # Ingestion orchestrator (spreadsheet/photo/form)
 │   │   ├── input_profiler.py                 # Spreadsheet structural profiler (multi-sheet support)
 │   │   ├── semantic_mapper.py                # LLM-based column mapper & sheet role classifier
@@ -139,9 +153,12 @@ backend/
 │   └── main.py               # FastAPI application entry point & lifespan management
 ├── alembic/                  # Database migration scripts & environment
 ├── tests/                    # Pytest test suite (in-memory SQLite)
+│   ├── test_action_narrative_generator.py # AI narrative generator unit tests & error propagation
 │   ├── test_agent_*.py                   # Agent auth, graph, streaming, and tool suites
 │   ├── test_ai_endpoints.py              # Tests for /api/v1/ai routes
 │   ├── test_amd_client.py                # Tests for AMDTokenFactoryClient
+│   ├── test_business_action_engine.py    # Deterministic rule engine, scoring, and modifier tests
+│   ├── test_business_actions.py          # BAC endpoints, persistence, lifecycle, and agent tool tests
 │   ├── test_sales_report_processing.py   # Multi-channel ingestion, validation, and confirmation
 │   ├── test_multi_sheet_processing.py    # Multi-sheet Excel workbook ingestion tests
 │   ├── test_sales_report_staging_row_bulk.py # Staging row bulk update tests
@@ -314,6 +331,13 @@ All API routes are prefixed with `/api/v1`.
 - `GET /api/v1/businesses/{business_id}/forecasting/runs` — List historical forecast runs with pagination and status filters.
 - `GET /api/v1/businesses/{business_id}/forecasting/runs/{run_id}` — Get a specific forecast run with predicted period points and prediction intervals.
 
+### Business Action Center
+- `POST /api/v1/businesses/{business_id}/business-actions/generate` — Generate and rank operational recommendations. Evaluates deterministic rules across Inventory, Sales, Forecasting, and Expenses, enriches candidates with LLM dynamic narratives, and deduplicates or returns ephemerally (`persist: false`).
+- `GET /api/v1/businesses/{business_id}/business-actions` — List recommendations with filtering (`status`, `category`, `urgency`, `evidence_quality`, `branch_id`, `product_id`, `min_priority`) and pagination.
+- `GET /api/v1/businesses/{business_id}/business-actions/{action_id}` — Retrieve detailed action candidate with AI rationale, recommended steps, risks, success metrics, limitations, and supporting data.
+- `PATCH /api/v1/businesses/{business_id}/business-actions/{action_id}/status` — Update action status (`in_progress`, `implemented`, `dismissed` with reason, `archived`).
+- Direct endpoints: `/api/v1/business-actions/generate`, `/api/v1/business-actions/`, `/api/v1/business-actions/{action_id}`, and `/api/v1/business-actions/{action_id}/status` for top-level access.
+
 ### Business Operations Agent (LangGraph)
 - `POST /api/v1/agent/businesses/{business_id}/chat` — Conversational business operations assistant streaming real-time Server-Sent Events (SSE). Requires JWT authentication and business membership.
   - Stream events: `agent_status`, `tool_start`, `tool_result`, `message_delta`, `approval_required`, `agent_error`, `agent_complete`, ending with `[DONE]`.
@@ -327,11 +351,14 @@ All API routes are prefixed with `/api/v1`.
 
 ## Testing
 
-The backend includes a comprehensive test suite (**152 test cases**) utilizing an isolated in-memory SQLite database:
+The backend includes a comprehensive test suite (**187 test cases**) utilizing an isolated in-memory SQLite database:
 
 ```bash
 # Run all tests
 pytest -v
+
+# Run Business Action Center tests (Deterministic Engine, AI Narrative Generator & Endpoints)
+pytest tests/test_business_action_engine.py tests/test_action_narrative_generator.py tests/test_business_actions.py -v
 
 # Run Sales Report Processing, Draft Master Data, Multi-Photo, Multi-Sheet, Bulk Staging, and Semantic Mapping tests
 pytest tests/test_sales_report_processing.py tests/test_validation_engine_draft.py tests/test_draft_activate.py tests/test_multi_photo_processing.py tests/test_multi_sheet_processing.py tests/test_sales_report_staging_row_bulk.py tests/test_semantic_mapping.py tests/test_sales_submissions.py -v

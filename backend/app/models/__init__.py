@@ -14,6 +14,7 @@ from app.models.product_cost_history import ProductCostHistory
 from app.models.product_price_history import ProductPriceHistory
 from app.models.forecast_run import ForecastRun
 from app.models.forecast_result import ForecastResult
+from app.models.business_action import BusinessAction
 
 __all__ = [
     "BigIntId",
@@ -34,5 +35,6 @@ __all__ = [
     "ProductPriceHistory",
     "ForecastRun",
     "ForecastResult",
+    "BusinessAction",
 ]
 

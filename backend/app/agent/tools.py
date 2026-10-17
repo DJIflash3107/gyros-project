@@ -260,18 +260,89 @@ def execute_invoke_forecasting(
 
 
 
-def execute_invoke_action_center(business_id: int, action: Optional[str] = None) -> Dict[str, Any]:
-    """Stub tool for Business Action Center."""
-    return {
-        "summary": "Business Action Center service is not yet available in this environment.",
-        "data": {
-            "status": "not_available",
-            "service": "action_center",
-            "message": "Business Action Center service is not yet available in this environment.",
-            "business_id": business_id,
-            "action": action,
-        },
-    }
+def execute_invoke_action_center(
+    business_id: int,
+    db: Optional[Session] = None,
+    action: Optional[str] = "generate",
+    branch_id: Optional[int] = None,
+    product_id: Optional[int] = None,
+    category: Optional[str] = None,
+    lookback_days: int = 30,
+    persist: bool = False,
+) -> Dict[str, Any]:
+    """Execute Business Action Center recommendations."""
+    if db is None:
+        return {
+            "summary": "Business Action Center service is not yet available without a database session.",
+            "data": {
+                "status": "not_available",
+                "service": "action_center",
+                "message": "Business Action Center requires an active database session.",
+                "business_id": business_id,
+                "action": action,
+            },
+        }
+
+    from app.services import business_action_service
+    from app.models.schemas.business_action import GenerateActionsRequest
+
+    import asyncio
+    import concurrent.futures
+
+    try:
+        categories = [category] if category else None
+        req = GenerateActionsRequest(
+            branch_id=branch_id,
+            product_id=product_id,
+            categories=categories,
+            lookback_days=lookback_days,
+            persist=persist,
+        )
+        coro = business_action_service.generate_actions(
+            db, business_id=business_id, request=req
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(asyncio.run, coro).result()
+        else:
+            result = asyncio.run(coro)
+        actions_summary = [
+            {
+                "id": a.id,
+                "title": a.title,
+                "action_type": a.action_type,
+                "category": a.category,
+                "urgency": a.urgency,
+                "expected_impact": a.expected_impact,
+                "priority_score": float(a.priority_score),
+                "evidence_quality": a.evidence_quality,
+                "rationale": a.rationale,
+                "recommended_steps": a.recommended_steps,
+            }
+            for a in result.actions[:5]
+        ]
+        return {
+            "summary": f"Generated {result.generated_count} business recommendations ({len(actions_summary)} top actions shown).",
+            "data": {
+                "status": "success",
+                "generated_count": result.generated_count,
+                "persisted_count": result.persisted_count,
+                "data_summary": result.data_summary,
+                "top_recommendations": actions_summary,
+            },
+        }
+    except Exception as e:
+        logger.warning(f"Error executing action center for business {business_id}: {type(e).__name__}: {str(e)}")
+        return {
+            "summary": f"Action Center failed: {str(e)}",
+            "data": None,
+            "error": str(e),
+        }
 
 
 def execute_invoke_promotion_planner(business_id: int, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -355,7 +426,12 @@ def execute_tool_by_name(
         elif tool_name == "invoke_action_center":
             return execute_invoke_action_center(
                 business_id,
-                action=safe_args.get("action"),
+                db=db,
+                action=safe_args.get("action", "generate"),
+                branch_id=safe_args.get("branch_id"),
+                product_id=safe_args.get("product_id"),
+                category=safe_args.get("category"),
+                lookback_days=safe_args.get("lookback_days", 30),
             )
         elif tool_name == "invoke_promotion_planner":
             return execute_invoke_promotion_planner(
@@ -450,11 +526,23 @@ def get_agent_tools(db: Session, business_id: int) -> List[BaseTool]:
 
     @tool
     def invoke_action_center(
-        action: Optional[str] = None,
+        action: Optional[str] = "generate",
+        branch_id: Optional[int] = None,
+        product_id: Optional[int] = None,
+        category: Optional[str] = None,
+        lookback_days: Optional[int] = 30,
         business_id: Optional[int] = None,
     ) -> dict:
-        """Invoke Business Action Center recommendations (stub service)."""
-        return execute_invoke_action_center(bound_business_id, action=action)
+        """Generate and evaluate actionable business recommendations across inventory, sales, demand forecasting, and expenses."""
+        return execute_invoke_action_center(
+            bound_business_id,
+            db=bound_db,
+            action=action,
+            branch_id=branch_id,
+            product_id=product_id,
+            category=category,
+            lookback_days=lookback_days or 30,
+        )
 
     @tool
     def invoke_promotion_planner(
