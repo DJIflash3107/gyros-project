@@ -5,6 +5,7 @@ import {
   XMarkIcon,
 } from "@heroicons/react/24/outline";
 import { useBusiness } from "../context/BusinessContext";
+import MarkdownText from "./MarkdownText";
 import {
   streamChat,
   type AgentCompleteData,
@@ -175,14 +176,23 @@ export default function AgentChatWidget() {
                     }`}
                   >
                     <div
-                      className={`max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm ${
+                      className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
                         message.role === "user"
-                          ? "bg-blue-700 text-white"
+                          ? "whitespace-pre-wrap bg-blue-700 text-white"
                           : "bg-slate-100 text-slate-800"
                       }`}
                     >
-                      {message.content ||
-                        (message.role === "assistant" && streaming ? "…" : "")}
+                      {message.role === "assistant" ? (
+                        message.content ? (
+                          <MarkdownText content={message.content} />
+                        ) : streaming ? (
+                          "…"
+                        ) : (
+                          ""
+                        )
+                      ) : (
+                        message.content
+                      )}
                     </div>
                   </li>
                 ))}

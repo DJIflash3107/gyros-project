@@ -57,12 +57,20 @@ function formatDate(value: string) {
   });
 }
 
-function formatMoney(value: number | null) {
+function formatMoney(value: number | string | null) {
   if (value == null) return "—";
-  return value.toLocaleString("en-US", {
+  const num = Number(value);
+  if (Number.isNaN(num)) return "—";
+  return num.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+}
+
+function toNumber(value: number | string | null): number | null {
+  if (value == null) return null;
+  const num = Number(value);
+  return Number.isNaN(num) ? null : num;
 }
 
 interface ItemFormRow {
@@ -371,8 +379,8 @@ export default function Promotions() {
                         </p>
                         <p className="text-sm font-semibold text-blue-950">
                           {formatMoney(selected.total_estimated_margin)}
-                          {selected.avg_margin_pct != null &&
-                            ` (${selected.avg_margin_pct.toFixed(1)}%)`}
+                          {toNumber(selected.avg_margin_pct) != null &&
+                            ` (${toNumber(selected.avg_margin_pct)!.toFixed(1)}%)`}
                         </p>
                       </div>
                     </div>
@@ -407,8 +415,8 @@ export default function Promotions() {
                               </td>
                               <td className="py-2 pr-4 text-right text-slate-700">
                                 {formatMoney(item.margin_per_unit)}
-                                {item.margin_pct != null &&
-                                  ` (${item.margin_pct.toFixed(1)}%)`}
+                                {toNumber(item.margin_pct) != null &&
+                                  ` (${toNumber(item.margin_pct)!.toFixed(1)}%)`}
                               </td>
                               <td className="py-2 text-right font-medium text-blue-950">
                                 {formatMoney(item.estimated_contribution)}
