@@ -1,41 +1,61 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import Modal from "../components/Modal";
 import SidebarLayout from "../components/SidebarLayout";
 import Toast, { type ToastType } from "../components/Toast";
+import { useBusiness } from "../context/BusinessContext";
+import { ApiError } from "../services/apiClient";
+import {
+  createProduct,
+  deleteProduct,
+  listProducts,
+  updateProduct,
+} from "../services/products";
+import type { Product } from "../services/types";
 
-const inventory = [
-  { id: 1, name: "Pita Bread", category: "Bakery", quantity: 120, price: 1.5, cost: 0.8, status: "In Stock" },
-  { id: 2, name: "Chicken", category: "Protein", quantity: 35, price: 8.0, cost: 4.5, status: "In Stock" },
-  { id: 3, name: "Lamb", category: "Protein", quantity: 12, price: 9.5, cost: 5.0, status: "Low Stock" },
-  { id: 4, name: "Tzatziki", category: "Sauce", quantity: 10, price: 3.0, cost: 1.2, status: "In Stock" },
-  { id: 5, name: "Tomatoes", category: "Produce", quantity: 8, price: 2.5, cost: 1.0, status: "Low Stock" },
-  { id: 6, name: "Onions", category: "Produce", quantity: 4, price: 1.75, cost: 0.6, status: "Low Stock" },
-  { id: 7, name: "Falafel Mix", category: "Dry Goods", quantity: 25, price: 5.0, cost: 2.0, status: "In Stock" },
-  { id: 8, name: "Hummus", category: "Prepared", quantity: 18, price: 4.0, cost: 1.5, status: "In Stock" },
-];
-
-type ModalMode = "updateStock" | "addProduct" | "editProduct";
+type ModalMode = "addProduct" | "editProduct";
 
 interface ProductFormData {
   name: string;
+  sku: string;
   category: string;
-  quantity: string;
-  price: string;
-  cost: string;
+  base_unit: string;
+  is_active: boolean;
+}
+
+const emptyForm: ProductFormData = {
+  name: "",
+  sku: "",
+  category: "",
+  base_unit: "",
+  is_active: true,
+};
+
+function statusBadge(status: string, isActive: boolean) {
+  if (!isActive) {
+    return "bg-slate-200 text-slate-600";
+  }
+  return status === "draft"
+    ? "bg-amber-100 text-amber-800"
+    : "bg-emerald-100 text-emerald-800";
+}
+
+function statusLabel(status: string, isActive: boolean) {
+  if (!isActive) return "Inactive";
+  return status === "draft" ? "Draft" : "Active";
 }
 
 export default function Inventory() {
+  const { activeBusiness } = useBusiness();
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalMode, setModalMode] = useState<ModalMode>("updateStock");
-  const [selectedProduct, setSelectedProduct] = useState<ProductFormData>({
-    name: "",
-    category: "",
-    quantity: "",
-    price: "",
-    cost: "",
-  });
-  const [updateMode, setUpdateMode] = useState<"replace" | "add">("replace");
-  const [stockValue, setStockValue] = useState("");
+  const [modalMode, setModalMode] = useState<ModalMode>("addProduct");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [form, setForm] = useState<ProductFormData>(emptyForm);
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: ToastType; isOpen: boolean }>({
     message: "",
     type: "success",
@@ -50,50 +70,104 @@ export default function Inventory() {
     setToast((prev) => ({ ...prev, isOpen: false }));
   };
 
-  const handleDelete = () => {
-    showToast("Product deleted successfully");
-  };
+  const fetchProducts = useCallback(async () => {
+    if (!activeBusiness) return;
+    try {
+      const list = await listProducts(activeBusiness.id, {
+        category: categoryFilter || undefined,
+        status: statusFilter || undefined,
+      });
+      setProducts(list);
+    } catch (err) {
+      showToast(
+        err instanceof ApiError ? err.message : "Failed to load products",
+        "error",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [activeBusiness, categoryFilter, statusFilter]);
 
-  const openUpdateStock = (name: string) => {
-    setSelectedProduct({ name, category: "", quantity: "", price: "", cost: "" });
-    setUpdateMode("replace");
-    setStockValue("");
-    setModalMode("updateStock");
-    setIsModalOpen(true);
-  };
+  useEffect(() => {
+    // Defer so no setState runs synchronously inside the effect body.
+    queueMicrotask(() => {
+      void fetchProducts();
+    });
+  }, [fetchProducts]);
+
+  const categories = Array.from(
+    new Set(products.map((p) => p.category).filter((c): c is string => !!c)),
+  ).sort();
 
   const openAddProduct = () => {
-    setSelectedProduct({ name: "", category: "", quantity: "", price: "", cost: "" });
+    setForm(emptyForm);
+    setEditingId(null);
     setModalMode("addProduct");
     setIsModalOpen(true);
   };
 
-  const openEditProduct = (item: (typeof inventory)[0]) => {
-    setSelectedProduct({
-      name: item.name,
-      category: item.category,
-      quantity: String(item.quantity),
-      price: String(item.price),
-      cost: String(item.cost),
+  const openEditProduct = (product: Product) => {
+    setForm({
+      name: product.name,
+      sku: product.sku ?? "",
+      category: product.category ?? "",
+      base_unit: product.base_unit,
+      is_active: product.is_active,
     });
+    setEditingId(product.id);
     setModalMode("editProduct");
     setIsModalOpen(true);
   };
 
-  const handleUpdateStock = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    showToast(`Stock updated: ${selectedProduct.name} ${updateMode} ${stockValue} pcs`);
-    setIsModalOpen(false);
+    if (!activeBusiness) return;
+    setSaving(true);
+    try {
+      if (modalMode === "addProduct") {
+        await createProduct(activeBusiness.id, {
+          name: form.name,
+          sku: form.sku || null,
+          category: form.category || null,
+          base_unit: form.base_unit,
+          is_active: form.is_active,
+        });
+        showToast(`Added product: ${form.name}`);
+      } else if (editingId != null) {
+        await updateProduct(activeBusiness.id, editingId, {
+          name: form.name,
+          sku: form.sku || null,
+          category: form.category || null,
+          base_unit: form.base_unit,
+          is_active: form.is_active,
+        });
+        showToast(`Updated product: ${form.name}`);
+      }
+      setIsModalOpen(false);
+      await fetchProducts();
+    } catch (err) {
+      showToast(
+        err instanceof ApiError ? err.message : "Failed to save product",
+        "error",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const handleProductForm = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (modalMode === "addProduct") {
-      showToast(`Added product: ${selectedProduct.name}`);
-    } else {
-      showToast(`Updated product: ${selectedProduct.name}`);
+  const handleDelete = async (product: Product) => {
+    if (!activeBusiness) return;
+    if (!window.confirm(`Delete product "${product.name}"?`)) return;
+    try {
+      await deleteProduct(activeBusiness.id, product.id);
+      showToast("Product deleted successfully");
+      await fetchProducts();
+    } catch (err) {
+      showToast(
+        err instanceof ApiError ? err.message : "Failed to delete product",
+        "error",
+      );
     }
-    setIsModalOpen(false);
   };
 
   return (
@@ -101,7 +175,7 @@ export default function Inventory() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-blue-950">Inventory & Stocks</h2>
-          <p className="mt-1 text-slate-600">Current stock levels and status.</p>
+          <p className="mt-1 text-slate-600">Products and pricing.</p>
         </div>
         <button
           type="button"
@@ -112,65 +186,99 @@ export default function Inventory() {
         </button>
       </div>
 
-      <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <select
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value)}
+          className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+        >
+          <option value="">All categories</option>
+          {categories.map((category) => (
+            <option key={category} value={category}>
+              {category}
+            </option>
+          ))}
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+        >
+          <option value="">All statuses</option>
+          <option value="active">Active</option>
+          <option value="draft">Draft</option>
+        </select>
+      </div>
+
+      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full min-w-[44rem] text-left text-sm">
           <thead className="bg-blue-950 text-white">
             <tr>
               <th className="px-6 py-3 font-medium">Product</th>
+              <th className="px-6 py-3 font-medium">SKU</th>
               <th className="px-6 py-3 font-medium">Category</th>
-              <th className="px-6 py-3 font-medium">Quantity</th>
-              <th className="px-6 py-3 font-medium">Price</th>
-              <th className="px-6 py-3 font-medium">Profit</th>
+              <th className="px-6 py-3 font-medium">Base Unit</th>
               <th className="px-6 py-3 font-medium">Status</th>
               <th className="px-6 py-3 font-medium">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {inventory.map((item) => (
-              <tr key={item.id} className="hover:bg-slate-50">
-                <td className="px-6 py-3 font-medium text-blue-900">{item.name}</td>
-                <td className="px-6 py-3 text-slate-700">{item.category}</td>
-                <td className="px-6 py-3 text-slate-700">{item.quantity} pcs</td>
-                <td className="px-6 py-3 text-slate-700">${item.price.toFixed(2)}</td>
-                <td className="px-6 py-3 text-emerald-700">${(item.price - item.cost).toFixed(2)}</td>
-                <td className="px-6 py-3">
-                  <span
-                    className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium whitespace-nowrap ${
-                      item.status === "In Stock"
-                        ? "bg-emerald-100 text-emerald-800"
-                        : "bg-amber-100 text-amber-800"
-                    }`}
-                  >
-                    {item.status}
-                  </span>
-                </td>
-                <td className="px-6 py-3">
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => openUpdateStock(item.name)}
-                      className="text-sm font-medium text-emerald-700 hover:text-emerald-900"
-                    >
-                      Update Stock
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openEditProduct(item)}
-                      className="text-sm font-medium text-blue-700 hover:text-blue-900"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDelete}
-                      className="text-sm font-medium text-red-600 hover:text-red-800"
-                    >
-                      Delete
-                    </button>
-                  </div>
+            {loading ? (
+              <tr>
+                <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
+                  Loading products...
                 </td>
               </tr>
-            ))}
+            ) : products.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
+                  No products yet. Add your first product to get started.
+                </td>
+              </tr>
+            ) : (
+              products.map((product) => (
+                <tr key={product.id} className="hover:bg-slate-50">
+                  <td className="px-6 py-3 font-medium text-blue-900">
+                    <Link
+                      to={`/inventory/${product.id}`}
+                      className="hover:underline"
+                    >
+                      {product.name}
+                    </Link>
+                  </td>
+                  <td className="px-6 py-3 text-slate-700">{product.sku ?? "—"}</td>
+                  <td className="px-6 py-3 text-slate-700">
+                    {product.category ?? "—"}
+                  </td>
+                  <td className="px-6 py-3 text-slate-700">{product.base_unit}</td>
+                  <td className="px-6 py-3">
+                    <span
+                      className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium whitespace-nowrap ${statusBadge(product.status, product.is_active)}`}
+                    >
+                      {statusLabel(product.status, product.is_active)}
+                    </span>
+                  </td>
+                  <td className="px-6 py-3">
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => openEditProduct(product)}
+                        className="text-sm font-medium text-blue-700 hover:text-blue-900"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(product)}
+                        className="text-sm font-medium text-red-600 hover:text-red-800"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
@@ -178,189 +286,108 @@ export default function Inventory() {
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={
-          modalMode === "updateStock"
-            ? `Update Stock: ${selectedProduct.name}`
-            : modalMode === "addProduct"
-              ? "Add Product"
-              : "Edit Product"
-        }
+        title={modalMode === "addProduct" ? "Add Product" : "Edit Product"}
       >
-        {modalMode === "updateStock" ? (
-          <form onSubmit={handleUpdateStock} className="space-y-4">
-            <div className="flex rounded-lg border border-slate-200 p-1">
-              <button
-                type="button"
-                onClick={() => setUpdateMode("replace")}
-                className={`flex-1 rounded-md py-2 text-sm font-medium transition-colors ${
-                  updateMode === "replace"
-                    ? "bg-blue-900 text-white"
-                    : "text-slate-600 hover:bg-slate-50"
-                }`}
-              >
-                Replace
-              </button>
-              <button
-                type="button"
-                onClick={() => setUpdateMode("add")}
-                className={`flex-1 rounded-md py-2 text-sm font-medium transition-colors ${
-                  updateMode === "add"
-                    ? "bg-blue-900 text-white"
-                    : "text-slate-600 hover:bg-slate-50"
-                }`}
-              >
-                Add
-              </button>
-            </div>
-            <div>
-              <label
-                htmlFor="stockValue"
-                className="block text-sm font-medium text-slate-700"
-              >
-                {updateMode === "replace" ? "New Stock Quantity" : "Quantity to Add"}
-              </label>
-              <input
-                id="stockValue"
-                type="number"
-                min={0}
-                required
-                value={stockValue}
-                onChange={(e) => setStockValue(e.target.value)}
-                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-            <div className="flex gap-3 pt-2">
-              <button
-                type="submit"
-                className="rounded-lg bg-blue-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-800"
-              >
-                Update Stock
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsModalOpen(false)}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        ) : (
-          <form onSubmit={handleProductForm} className="space-y-4">
-            <div>
-              <label
-                htmlFor="productName"
-                className="block text-sm font-medium text-slate-700"
-              >
-                Product Name
-              </label>
-              <input
-                id="productName"
-                type="text"
-                required
-                value={selectedProduct.name}
-                onChange={(e) =>
-                  setSelectedProduct((prev) => ({ ...prev, name: e.target.value }))
-                }
-                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="productCategory"
-                className="block text-sm font-medium text-slate-700"
-              >
-                Category
-              </label>
-              <input
-                id="productCategory"
-                type="text"
-                required
-                value={selectedProduct.category}
-                onChange={(e) =>
-                  setSelectedProduct((prev) => ({ ...prev, category: e.target.value }))
-                }
-                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-            {modalMode === "addProduct" && (
-              <div>
-                <label
-                  htmlFor="productQuantity"
-                  className="block text-sm font-medium text-slate-700"
-                >
-                  Quantity (pcs)
-                </label>
-                <input
-                  id="productQuantity"
-                  type="number"
-                  min={0}
-                  required
-                  value={selectedProduct.quantity}
-                  onChange={(e) =>
-                    setSelectedProduct((prev) => ({ ...prev, quantity: e.target.value }))
-                  }
-                  className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-                />
-              </div>
-            )}
-            <div>
-              <label
-                htmlFor="productPrice"
-                className="block text-sm font-medium text-slate-700"
-              >
-                Selling Price
-              </label>
-              <input
-                id="productPrice"
-                type="number"
-                min={0}
-                step="0.01"
-                required
-                value={selectedProduct.price}
-                onChange={(e) =>
-                  setSelectedProduct((prev) => ({ ...prev, price: e.target.value }))
-                }
-                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="productCost"
-                className="block text-sm font-medium text-slate-700"
-              >
-                Cost Price
-              </label>
-              <input
-                id="productCost"
-                type="number"
-                min={0}
-                step="0.01"
-                required
-                value={selectedProduct.cost}
-                onChange={(e) =>
-                  setSelectedProduct((prev) => ({ ...prev, cost: e.target.value }))
-                }
-                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-            <div className="flex gap-3 pt-2">
-              <button
-                type="submit"
-                className="rounded-lg bg-blue-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-800"
-              >
-                {modalMode === "addProduct" ? "Add Product" : "Save Changes"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsModalOpen(false)}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        )}
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label
+              htmlFor="productName"
+              className="block text-sm font-medium text-slate-700"
+            >
+              Product Name
+            </label>
+            <input
+              id="productName"
+              type="text"
+              required
+              value={form.name}
+              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="productSku"
+              className="block text-sm font-medium text-slate-700"
+            >
+              SKU
+            </label>
+            <input
+              id="productSku"
+              type="text"
+              value={form.sku}
+              onChange={(e) => setForm((prev) => ({ ...prev, sku: e.target.value }))}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="productCategory"
+              className="block text-sm font-medium text-slate-700"
+            >
+              Category
+            </label>
+            <input
+              id="productCategory"
+              type="text"
+              value={form.category}
+              onChange={(e) =>
+                setForm((prev) => ({ ...prev, category: e.target.value }))
+              }
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="productBaseUnit"
+              className="block text-sm font-medium text-slate-700"
+            >
+              Base Unit
+            </label>
+            <input
+              id="productBaseUnit"
+              type="text"
+              required
+              placeholder="e.g. pcs, kg, L"
+              value={form.base_unit}
+              onChange={(e) =>
+                setForm((prev) => ({ ...prev, base_unit: e.target.value }))
+              }
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={form.is_active}
+              onChange={(e) =>
+                setForm((prev) => ({ ...prev, is_active: e.target.checked }))
+              }
+              className="h-4 w-4 rounded border-slate-300"
+            />
+            Active
+          </label>
+          <div className="flex gap-3 pt-2">
+            <button
+              type="submit"
+              disabled={saving}
+              className="rounded-lg bg-blue-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-800 disabled:opacity-50"
+            >
+              {saving
+                ? "Saving..."
+                : modalMode === "addProduct"
+                  ? "Add Product"
+                  : "Save Changes"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsModalOpen(false)}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
       </Modal>
 
       <Toast

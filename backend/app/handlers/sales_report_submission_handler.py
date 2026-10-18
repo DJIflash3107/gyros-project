@@ -15,7 +15,10 @@ from app.models.schemas.sales_report_processing import (
     ProcessingResultResponse,
 )
 from app.models.schemas.pagination import PaginationParams
-from app.services import sales_report_submission_service, sales_report_processing_service
+from app.services import (
+    sales_report_submission_service,
+    sales_report_processing_service,
+)
 from app.helpers.response import success_response, paginated_response
 from app.helpers.exceptions import ValidationException, AIConfigException
 from app.helpers.error_codes import ErrorCodeRegistry
@@ -30,10 +33,16 @@ def create_submission_handler(
     current_user: User,
     db: Session,
 ) -> JSONResponse:
-    submission = sales_report_submission_service.create_submission(db, business_id, data, current_user)
+    submission = sales_report_submission_service.create_submission(
+        db, business_id, data, current_user
+    )
     return success_response(
         message="Sales report submission created successfully",
-        data={"submission": SalesReportSubmissionResponse.model_validate(submission).model_dump()},
+        data={
+            "submission": SalesReportSubmissionResponse.model_validate(
+                submission
+            ).model_dump()
+        },
         status_code=201,
     )
 
@@ -44,8 +53,12 @@ def list_submissions_handler(
     params: PaginationParams,
     db: Session,
 ) -> JSONResponse:
-    items, pagination = sales_report_submission_service.list_submissions(db, business_id, status, params.page, params.page_size)
-    response_items = [SalesReportSubmissionResponse.model_validate(s).model_dump() for s in items]
+    items, pagination = sales_report_submission_service.list_submissions(
+        db, business_id, status, params.page, params.page_size
+    )
+    response_items = [
+        SalesReportSubmissionResponse.model_validate(s).model_dump() for s in items
+    ]
     return paginated_response(
         message="Sales report submissions retrieved successfully",
         items=response_items,
@@ -54,11 +67,19 @@ def list_submissions_handler(
     )
 
 
-def get_submission_handler(business_id: int, submission_id: int, db: Session) -> JSONResponse:
-    submission = sales_report_submission_service.get_submission(db, business_id, submission_id)
+def get_submission_handler(
+    business_id: int, submission_id: int, db: Session
+) -> JSONResponse:
+    submission = sales_report_submission_service.get_submission(
+        db, business_id, submission_id
+    )
     return success_response(
         message="Sales report submission retrieved successfully",
-        data={"submission": SalesReportSubmissionResponse.model_validate(submission).model_dump()},
+        data={
+            "submission": SalesReportSubmissionResponse.model_validate(
+                submission
+            ).model_dump()
+        },
     )
 
 
@@ -68,14 +89,22 @@ def update_submission_handler(
     data: SalesReportSubmissionUpdate,
     db: Session,
 ) -> JSONResponse:
-    submission = sales_report_submission_service.update_submission(db, business_id, submission_id, data)
+    submission = sales_report_submission_service.update_submission(
+        db, business_id, submission_id, data
+    )
     return success_response(
         message="Sales report submission updated successfully",
-        data={"submission": SalesReportSubmissionResponse.model_validate(submission).model_dump()},
+        data={
+            "submission": SalesReportSubmissionResponse.model_validate(
+                submission
+            ).model_dump()
+        },
     )
 
 
-def delete_submission_handler(business_id: int, submission_id: int, db: Session) -> JSONResponse:
+def delete_submission_handler(
+    business_id: int, submission_id: int, db: Session
+) -> JSONResponse:
     sales_report_submission_service.delete_submission(db, business_id, submission_id)
     return success_response(
         message="Sales report submission deleted successfully",
@@ -89,10 +118,16 @@ def confirm_submission_handler(
     current_user: User,
     db: Session,
 ) -> JSONResponse:
-    submission = sales_report_submission_service.confirm_submission(db, business_id, submission_id, current_user)
+    submission = sales_report_submission_service.confirm_submission(
+        db, business_id, submission_id, current_user
+    )
     return success_response(
         message="Sales report submission confirmed and finalized successfully",
-        data={"submission": SalesReportSubmissionResponse.model_validate(submission).model_dump()},
+        data={
+            "submission": SalesReportSubmissionResponse.model_validate(
+                submission
+            ).model_dump()
+        },
     )
 
 
@@ -110,7 +145,9 @@ async def process_submission_handler(
 ) -> Union[JSONResponse, StreamingResponse]:
     if coverage_end < coverage_start:
         raise ValidationException(
-            errors={"coverage_end": "coverage_end must be greater than or equal to coverage_start"},
+            errors={
+                "coverage_end": "coverage_end must be greater than or equal to coverage_start"
+            },
             message="Request validation failed",
         )
 
@@ -125,6 +162,23 @@ async def process_submission_handler(
         file_bytes = await primary_file.read()
         file_name = primary_file.filename or "upload"
         mime_type = primary_file.content_type or "application/octet-stream"
+
+        if stream:
+            events = (
+                sales_report_processing_service.process_spreadsheet_submission_stream(
+                    db=db,
+                    business_id=business_id,
+                    current_user=current_user,
+                    file_bytes=file_bytes,
+                    file_name=file_name,
+                    mime_type=mime_type,
+                    report_period_type=report_period_type,
+                    coverage_start=coverage_start,
+                    coverage_end=coverage_end,
+                    branch_id=branch_id,
+                )
+            )
+            return StreamingResponse(iter(events), media_type="text/event-stream")
 
         result = sales_report_processing_service.process_file_submission(
             db=db,
@@ -172,7 +226,13 @@ async def process_submission_handler(
                     error_code=ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
                 )
 
-            if not (f_mime.startswith("image/") or any(f_name.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp"))):
+            if not (
+                f_mime.startswith("image/")
+                or any(
+                    f_name.lower().endswith(ext)
+                    for ext in (".jpg", ".jpeg", ".png", ".webp")
+                )
+            ):
                 raise ValidationException(
                     errors={
                         "file": f"File '{f_name}' is not a supported image format (JPEG, PNG, WEBP)",
@@ -224,7 +284,9 @@ async def process_submission_handler(
         for img_bytes, _, _ in images:
             combined_hash.update(hashlib.sha256(img_bytes).digest())
         sha256_hex = combined_hash.hexdigest()
-        sales_report_processing_service.check_duplicate_submission(db, business_id, sha256_hex)
+        sales_report_processing_service.check_duplicate_submission(
+            db, business_id, sha256_hex
+        )
 
         # If stream is explicitly False, process synchronously and return JSON
         if stream is False:
@@ -245,15 +307,17 @@ async def process_submission_handler(
             )
 
         # Otherwise, stream SSE progress
-        generator = sales_report_processing_service.process_multi_photo_submission_stream(
-            db=db,
-            business_id=business_id,
-            current_user=current_user,
-            images=images,
-            report_period_type=report_period_type,
-            coverage_start=coverage_start,
-            coverage_end=coverage_end,
-            branch_id=branch_id,
+        generator = (
+            sales_report_processing_service.process_multi_photo_submission_stream(
+                db=db,
+                business_id=business_id,
+                current_user=current_user,
+                images=images,
+                report_period_type=report_period_type,
+                coverage_start=coverage_start,
+                coverage_end=coverage_end,
+                branch_id=branch_id,
+            )
         )
         return StreamingResponse(generator, media_type="text/event-stream")
 

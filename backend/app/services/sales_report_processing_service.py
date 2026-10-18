@@ -24,7 +24,11 @@ from app.models.schemas.product import ProductDraftResponse
 from app.models.schemas.branch import BranchDraftResponse
 from app.configs.settings import settings
 from app.helpers.error_codes import ErrorCodeRegistry
-from app.helpers.exceptions import ConflictException, ValidationException, NotFoundException
+from app.helpers.exceptions import (
+    ConflictException,
+    ValidationException,
+    NotFoundException,
+)
 from app.helpers.logging import logger
 from app.services.input_profiler import (
     profile_excel,
@@ -54,8 +58,59 @@ from app.services.validation_engine import (
     compute_missing_branch_fields,
 )
 
-
 MAX_SPREADSHEET_BYTES = 10 * 1024 * 1024  # 10 MB limit
+
+
+class _EventCollector:
+    """Collects SSE progress events emitted by synchronous processing code."""
+
+    def __init__(self) -> None:
+        self.events: List[str] = []
+
+    def status(self, step: str, message: str) -> None:
+        self.events.append(
+            format_sse("report_status", {"step": step, "message": message})
+        )
+
+    def error(self, error_code: str, message: str) -> None:
+        self.events.append(
+            format_sse("report_error", {"error_code": error_code, "message": message})
+        )
+
+    def validation_result(
+        self,
+        total: int,
+        ready: int,
+        pending_review: int,
+        needs_correction: int,
+        errors: int,
+    ) -> None:
+        self.events.append(
+            format_sse(
+                "validation_result",
+                {
+                    "total": total,
+                    "ready": ready,
+                    "pending_review": pending_review,
+                    "needs_correction": needs_correction,
+                    "errors": errors,
+                },
+            )
+        )
+
+    def complete(self, submission_id: int, summary: "ProcessingSummary") -> None:
+        self.events.append(
+            format_sse(
+                "report_complete",
+                {
+                    "submission_id": submission_id,
+                    "total_rows": summary.total_rows,
+                    "accepted_rows": 0,
+                    "rejected_rows": summary.needs_correction_rows,
+                    "summary": summary.model_dump(mode="json"),
+                },
+            )
+        )
 
 
 def _run_coroutine_sync(coro):
@@ -90,7 +145,12 @@ def check_duplicate_submission(
             SalesReportSubmission.business_id == business_id,
             SalesReportSubmission.source_sha256 == sha256_hex,
             SalesReportSubmission.status.notin_(["rejected", "failed"]),
-            not_(and_(SalesReportSubmission.status == "confirmed", SalesReportSubmission.accepted_rows == 0)),
+            not_(
+                and_(
+                    SalesReportSubmission.status == "confirmed",
+                    SalesReportSubmission.accepted_rows == 0,
+                )
+            ),
         )
         .first()
     )
@@ -122,13 +182,17 @@ def _deduplicate_cross_sheet(
         sheet_name = str(row.get("source_sheet_name") or "")
         row_num = row.get("source_row_number")
 
-        raw_prod = str(
-            row.get("raw_product_name")
-            or row.get("product")
-            or row.get("item")
-            or row.get("product_id")
-            or ""
-        ).strip().lower()
+        raw_prod = (
+            str(
+                row.get("raw_product_name")
+                or row.get("product")
+                or row.get("item")
+                or row.get("product_id")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
 
         if not raw_prod:
             unique_rows.append(row)
@@ -216,7 +280,10 @@ def _persist_staging_rows_and_issues(
     created_issues: List[ImportIssue] = []
     for issue_data in issues_create:
         staging_row_id = None
-        if issue_data.source_row_number is not None and issue_data.source_row_number in rows_by_source_num:
+        if (
+            issue_data.source_row_number is not None
+            and issue_data.source_row_number in rows_by_source_num
+        ):
             staging_row_id = rows_by_source_num[issue_data.source_row_number].id
 
         issue = ImportIssue(
@@ -238,7 +305,9 @@ def _persist_staging_rows_and_issues(
     # Calculate summary
     ready_count = sum(1 for r in created_rows if r.review_status == "ready")
     pending_count = sum(1 for r in created_rows if r.review_status == "pending_review")
-    needs_corr_count = sum(1 for r in created_rows if r.review_status == "needs_correction")
+    needs_corr_count = sum(
+        1 for r in created_rows if r.review_status == "needs_correction"
+    )
 
     # Collect auto-created draft products and branches
     auto_created_products: List[ProductDraftResponse] = []
@@ -306,9 +375,13 @@ def process_file_submission(
     coverage_start: date,
     coverage_end: date,
     branch_id: Optional[int] = None,
+    emitter: Optional[_EventCollector] = None,
 ) -> ProcessingResultResponse:
     """
     Process spreadsheet or non-streaming photo upload submission.
+
+    When ``emitter`` is provided, SSE progress events are collected so the
+    caller can flush them to the client after the synchronous work finishes.
     """
     # Validate branch existence if provided
     if branch_id is not None:
@@ -323,7 +396,9 @@ def process_file_submission(
         )
         if not branch:
             raise NotFoundException(
-                errors={"branch_id": f"Branch with ID {branch_id} does not exist in this business"},
+                errors={
+                    "branch_id": f"Branch with ID {branch_id} does not exist in this business"
+                },
                 message="Branch not found",
             )
 
@@ -359,7 +434,13 @@ def process_file_submission(
                 message="Image exceeds size limit",
                 error_code=ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
             )
-        if not (mime_type.startswith("image/") or any(file_name.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp"))):
+        if not (
+            mime_type.startswith("image/")
+            or any(
+                file_name.lower().endswith(ext)
+                for ext in (".jpg", ".jpeg", ".png", ".webp")
+            )
+        ):
             raise ValidationException(
                 errors={
                     "file": "Photo input method requires an image file (JPEG, PNG, WEBP)",
@@ -394,6 +475,9 @@ def process_file_submission(
     db.commit()
     db.refresh(submission)
 
+    if emitter:
+        emitter.status("extracting", "Analyzing workbook structure...")
+
     try:
         # Extract rows
         mapping_results: List[SemanticMappingResult] = []
@@ -418,6 +502,12 @@ def process_file_submission(
             if is_excel:
                 workbook_profile = profile_excel_workbook(file_bytes)
                 sheets_skipped.extend(workbook_profile.skipped_sheets)
+
+                if emitter:
+                    emitter.status(
+                        "extracting",
+                        f"Classifying {len(workbook_profile.sheet_profiles)} worksheet(s) with AI...",
+                    )
 
                 classifications = _run_coroutine_sync(
                     classify_sheet_roles(workbook_profile.sheet_profiles, biz_context)
@@ -454,7 +544,9 @@ def process_file_submission(
                     import io as py_io
                     import openpyxl as py_openpyxl
                     from app.models.expense import Expense
-                    from app.services.expense_spreadsheet_parser import parse_expense_worksheet
+                    from app.services.expense_spreadsheet_parser import (
+                        parse_expense_worksheet,
+                    )
                     from app.services.expense_import_service import resolve_branch_id
                     from app.services.semantic_mapper import (
                         map_expense_columns_with_llm,
@@ -463,8 +555,13 @@ def process_file_submission(
                     )
 
                     try:
-                        wb_exp = py_openpyxl.load_workbook(py_io.BytesIO(file_bytes), read_only=True, data_only=True)
-                        profile_by_name = {p.active_sheet_name: p for p in workbook_profile.sheet_profiles}
+                        wb_exp = py_openpyxl.load_workbook(
+                            py_io.BytesIO(file_bytes), read_only=True, data_only=True
+                        )
+                        profile_by_name = {
+                            p.active_sheet_name: p
+                            for p in workbook_profile.sheet_profiles
+                        }
 
                         for exp_sheet_name in expense_sheets:
                             if exp_sheet_name in wb_exp.sheetnames:
@@ -474,17 +571,38 @@ def process_file_submission(
                                 if exp_profile:
                                     if settings.SEMANTIC_MAPPING_ENABLED:
                                         try:
-                                            exp_m_res = _run_coroutine_sync(map_expense_columns_with_llm(exp_profile, biz_context))
+                                            if emitter:
+                                                emitter.status(
+                                                    "mapping",
+                                                    f"Mapping expense sheet '{exp_sheet_name}' columns with AI...",
+                                                )
+                                            exp_m_res = _run_coroutine_sync(
+                                                map_expense_columns_with_llm(
+                                                    exp_profile, biz_context
+                                                )
+                                            )
                                         except Exception as e:
-                                            logger.warning(f"Failed to semantically map expense sheet {exp_sheet_name}: {e}. Falling back to default expense mapping.")
-                                            exp_m_res = build_fallback_expense_mapping(exp_profile.headers, reason=f"Semantic mapping error: {str(e)}")
+                                            logger.warning(
+                                                f"Failed to semantically map expense sheet {exp_sheet_name}: {e}. Falling back to default expense mapping."
+                                            )
+                                            exp_m_res = build_fallback_expense_mapping(
+                                                exp_profile.headers,
+                                                reason=f"Semantic mapping error: {str(e)}",
+                                            )
                                     else:
-                                        exp_m_res = build_fallback_expense_mapping(exp_profile.headers, reason="Semantic mapping disabled")
+                                        exp_m_res = build_fallback_expense_mapping(
+                                            exp_profile.headers,
+                                            reason="Semantic mapping disabled",
+                                        )
 
                                     if exp_m_res:
                                         mapping_results.append(exp_m_res)
                                         for entry in exp_m_res.mappings:
-                                            if entry.confidence < settings.SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD and entry.target_field != "_skip":
+                                            if (
+                                                entry.confidence
+                                                < settings.SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD
+                                                and entry.target_field != "_skip"
+                                            ):
                                                 extra_issues.append(
                                                     ImportIssueCreate(
                                                         source_row_number=None,
@@ -505,10 +623,21 @@ def process_file_submission(
                                 )
 
                                 # Semantic AI category categorization for rows
-                                exp_cats = _run_coroutine_sync(categorize_expenses_with_llm(exp_rows, biz_context))
+                                exp_cats = _run_coroutine_sync(
+                                    categorize_expenses_with_llm(exp_rows, biz_context)
+                                )
                                 for idx, r in enumerate(exp_rows):
-                                    parsed_cat = exp_cats[idx] if idx < len(exp_cats) else "Operations"
-                                    b_id = resolve_branch_id(db, business_id, r.get("branch") or r.get("branch_id"), branch_id)
+                                    parsed_cat = (
+                                        exp_cats[idx]
+                                        if idx < len(exp_cats)
+                                        else "Operations"
+                                    )
+                                    b_id = resolve_branch_id(
+                                        db,
+                                        business_id,
+                                        r.get("branch") or r.get("branch_id"),
+                                        branch_id,
+                                    )
                                     amt = Decimal(str(r["amount"]))
                                     extracted_expense_count += 1
                                     extracted_expense_total += amt
@@ -522,49 +651,82 @@ def process_file_submission(
                                             amount=amt,
                                             currency=r.get("currency", "IDR"),
                                             source_submission_id=submission.id,
-                                            source_row_number=r.get("source_row_number"),
+                                            source_row_number=r.get(
+                                                "source_row_number"
+                                            ),
                                             created_by_user_id=current_user.id,
                                         )
                                     )
                                 sheets_processed.append(exp_sheet_name)
                     except Exception as e:
-                        logger.warning(f"Error parsing expense sheets from workbook: {e}")
+                        logger.warning(
+                            f"Error parsing expense sheets from workbook: {e}"
+                        )
 
                 # Retain relevant reference sheets for matching
                 for p in workbook_profile.sheet_profiles:
                     if p.active_sheet_name in reference_sheets:
                         for idx, h in enumerate(p.headers):
-                            h_clean = re.sub(r"[^a-zA-Z0-9]+", "_", str(h).strip().lower()).strip("_")
-                            if h_clean in ("product", "product_name", "nama_produk", "item", "nama"):
+                            h_clean = re.sub(
+                                r"[^a-zA-Z0-9]+", "_", str(h).strip().lower()
+                            ).strip("_")
+                            if h_clean in (
+                                "product",
+                                "product_name",
+                                "nama_produk",
+                                "item",
+                                "nama",
+                            ):
                                 for s_row in p.sample_rows:
                                     if idx < len(s_row) and s_row[idx]:
                                         val = str(s_row[idx]).strip()
                                         if val and val not in known_prod_names:
-                                            biz_context["products"].append({"name": val})
+                                            biz_context["products"].append(
+                                                {"name": val}
+                                            )
                                             known_prod_names.add(val)
 
                 if not sales_sheets and not expense_sheets:
                     raise ValidationException(
-                        errors={"file": "Workbook contains no worksheets classified with sales report or expense data", "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE},
+                        errors={
+                            "file": "Workbook contains no worksheets classified with sales report or expense data",
+                            "error_code": ErrorCodeRegistry.RPT_EMPTY_FILE,
+                        },
                         message="Spreadsheet contains no data rows",
                         error_code=ErrorCodeRegistry.RPT_EMPTY_FILE,
                     )
 
                 # Map columns per sales sheet
                 sheet_mappings: Dict[str, Optional[SemanticMappingResult]] = {}
-                profile_by_name = {p.active_sheet_name: p for p in workbook_profile.sheet_profiles}
+                profile_by_name = {
+                    p.active_sheet_name: p for p in workbook_profile.sheet_profiles
+                }
 
                 for s_name in sales_sheets:
                     s_profile = profile_by_name[s_name]
                     m_res = None
                     if settings.SEMANTIC_MAPPING_ENABLED:
                         try:
-                            m_res = _run_coroutine_sync(map_columns_with_llm(s_profile, biz_context))
+                            if emitter:
+                                emitter.status(
+                                    "mapping",
+                                    f"Mapping sheet '{s_name}' columns with AI...",
+                                )
+                            m_res = _run_coroutine_sync(
+                                map_columns_with_llm(s_profile, biz_context)
+                            )
                         except Exception as e:
-                            logger.warning(f"Failed to profile or semantically map sheet {s_name}: {e}. Falling back to default mapping.")
-                            m_res = build_fallback_mapping(s_profile.headers, reason=f"Semantic mapping error: {str(e)}")
+                            logger.warning(
+                                f"Failed to profile or semantically map sheet {s_name}: {e}. Falling back to default mapping."
+                            )
+                            m_res = build_fallback_mapping(
+                                s_profile.headers,
+                                reason=f"Semantic mapping error: {str(e)}",
+                            )
                     else:
-                        m_res = build_fallback_mapping(s_profile.headers, reason="Semantic mapping disabled")
+                        m_res = build_fallback_mapping(
+                            s_profile.headers, reason="Semantic mapping disabled"
+                        )
                     sheet_mappings[s_name] = m_res
                     if m_res:
                         mapping_results.append(m_res)
@@ -584,12 +746,22 @@ def process_file_submission(
                 profile = profile_csv(file_bytes)
                 if settings.SEMANTIC_MAPPING_ENABLED:
                     try:
-                        m_res = _run_coroutine_sync(map_columns_with_llm(profile, biz_context))
+                        if emitter:
+                            emitter.status("mapping", "Mapping CSV columns with AI...")
+                        m_res = _run_coroutine_sync(
+                            map_columns_with_llm(profile, biz_context)
+                        )
                     except Exception as e:
-                        logger.warning(f"Failed to profile or semantically map CSV: {e}. Falling back to default parsing.")
-                        m_res = build_fallback_mapping(profile.headers, reason=f"Semantic mapping error: {str(e)}")
+                        logger.warning(
+                            f"Failed to profile or semantically map CSV: {e}. Falling back to default parsing."
+                        )
+                        m_res = build_fallback_mapping(
+                            profile.headers, reason=f"Semantic mapping error: {str(e)}"
+                        )
                 else:
-                    m_res = build_fallback_mapping(profile.headers, reason="Semantic mapping disabled")
+                    m_res = build_fallback_mapping(
+                        profile.headers, reason="Semantic mapping disabled"
+                    )
 
                 if m_res:
                     mapping_results.append(m_res)
@@ -605,10 +777,17 @@ def process_file_submission(
                 .all()
             )
             biz_context = {"products": [{"name": p.name} for p in products]}
-            raw_rows, _ = _run_coroutine_sync(extract_from_photo(file_bytes, mime_type, biz_context))
+            raw_rows, _ = _run_coroutine_sync(
+                extract_from_photo(file_bytes, mime_type, biz_context)
+            )
             is_vision = True
 
         # Validation engine
+        if emitter:
+            emitter.status(
+                "validating", f"Validating {len(raw_rows)} extracted row(s)..."
+            )
+
         staging_rows_create, issues_create = validate_staging_rows(
             db=db,
             business_id=business_id,
@@ -621,15 +800,42 @@ def process_file_submission(
             is_vision=is_vision,
         )
 
+        if emitter:
+            emitter.validation_result(
+                total=len(staging_rows_create),
+                ready=sum(1 for r in staging_rows_create if r.review_status == "ready"),
+                pending_review=sum(
+                    1
+                    for r in staging_rows_create
+                    if r.review_status == "pending_review"
+                ),
+                needs_correction=sum(
+                    1
+                    for r in staging_rows_create
+                    if r.review_status == "needs_correction"
+                ),
+                errors=sum(
+                    1 for i in issues_create if i.severity in ("error", "critical")
+                ),
+            )
+            emitter.status("staging", "Persisting staging records...")
+
         # Low-confidence semantic mapping warning issues
         for m_res in mapping_results:
             if m_res and m_res.mappings:
                 for entry in m_res.mappings:
-                    if entry.confidence < settings.SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD:
+                    if (
+                        entry.confidence
+                        < settings.SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD
+                    ):
                         issues_create.append(
                             ImportIssueCreate(
                                 source_row_number=None,
-                                field_name=entry.target_field if entry.target_field != "_skip" else None,
+                                field_name=(
+                                    entry.target_field
+                                    if entry.target_field != "_skip"
+                                    else None
+                                ),
                                 issue_code=ErrorCodeRegistry.RPT_LOW_CONFIDENCE,
                                 severity="warning",
                                 message=f"Column '{entry.source_column}' mapped to '{entry.target_field}' with low confidence ({entry.confidence:.0%}). Reason: {entry.reasoning or 'Ambiguous mapping'}",
@@ -700,7 +906,9 @@ def process_manual_form_batch(
         )
         if not branch:
             raise NotFoundException(
-                errors={"branch_id": f"Branch with ID {batch_data.branch_id} does not exist in this business"},
+                errors={
+                    "branch_id": f"Branch with ID {batch_data.branch_id} does not exist in this business"
+                },
                 message="Branch not found",
             )
 
@@ -769,6 +977,49 @@ def process_manual_form_batch(
         raise
 
 
+def process_spreadsheet_submission_stream(
+    db: Session,
+    business_id: int,
+    current_user: User,
+    file_bytes: bytes,
+    file_name: str,
+    mime_type: str,
+    report_period_type: str,
+    coverage_start: date,
+    coverage_end: date,
+    branch_id: Optional[int] = None,
+) -> List[str]:
+    """
+    Process a spreadsheet upload with SSE-style progress events.
+
+    Returns the list of formatted SSE event strings after the synchronous
+    work completes. Any error event is appended as the final event so the
+    client always receives a terminal message.
+    """
+    emitter = _EventCollector()
+    try:
+        result = process_file_submission(
+            db=db,
+            business_id=business_id,
+            current_user=current_user,
+            file_bytes=file_bytes,
+            file_name=file_name,
+            mime_type=mime_type,
+            input_method="spreadsheet",
+            report_period_type=report_period_type,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            branch_id=branch_id,
+            emitter=emitter,
+        )
+        emitter.complete(result.submission.id, result.summary)
+    except Exception as e:
+        error_code = getattr(e, "error_code", ErrorCodeRegistry.RPT_PROCESSING_ERROR)
+        message = getattr(e, "message", None) or str(e)
+        emitter.error(error_code, message)
+    return emitter.events
+
+
 def process_multi_photo_submission(
     db: Session,
     business_id: int,
@@ -824,8 +1075,8 @@ def process_multi_photo_submission(
             for inner_idx, row in enumerate(rows, start=1):
                 row["source_image_index"] = img_idx
                 row["source_image_name"] = img_name
-                row["source_row_number"] = (
-                    (img_idx - 1) * 1000 + (row.get("source_row_number") or inner_idx)
+                row["source_row_number"] = (img_idx - 1) * 1000 + (
+                    row.get("source_row_number") or inner_idx
                 )
             all_raw_rows.extend(rows)
 
@@ -887,7 +1138,13 @@ async def process_multi_photo_submission_stream(
     for img_bytes, img_name, _ in images:
         if len(img_bytes) > max_img_bytes:
             err_msg = f"Image '{img_name}' exceeds maximum size limit of {settings.VISION_MAX_IMAGE_SIZE_MB}MB"
-            yield format_sse("report_error", {"error_code": ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE, "message": err_msg})
+            yield format_sse(
+                "report_error",
+                {
+                    "error_code": ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
+                    "message": err_msg,
+                },
+            )
             return
         combined_hash.update(hashlib.sha256(img_bytes).digest())
 
@@ -964,8 +1221,8 @@ async def process_multi_photo_submission_stream(
             for inner_idx, row in enumerate(raw_rows, start=1):
                 row["source_image_index"] = img_idx
                 row["source_image_name"] = img_name
-                row["source_row_number"] = (
-                    (img_idx - 1) * 1000 + (row.get("source_row_number") or inner_idx)
+                row["source_row_number"] = (img_idx - 1) * 1000 + (
+                    row.get("source_row_number") or inner_idx
                 )
             all_raw_rows.extend(raw_rows)
 
@@ -978,8 +1235,17 @@ async def process_multi_photo_submission_stream(
         yield format_sse("report_error", {"error_code": error_code, "message": msg})
         return
 
-    yield format_sse("report_status", {"step": "mapping", "message": "Structuring and verifying extracted fields across all images..."})
-    yield format_sse("report_status", {"step": "validating", "message": "Validating extracted rows..."})
+    yield format_sse(
+        "report_status",
+        {
+            "step": "mapping",
+            "message": "Structuring and verifying extracted fields across all images...",
+        },
+    )
+    yield format_sse(
+        "report_status",
+        {"step": "validating", "message": "Validating extracted rows..."},
+    )
 
     try:
         staging_rows_create, issues_create = validate_staging_rows(
@@ -996,8 +1262,12 @@ async def process_multi_photo_submission_stream(
 
         error_issues_count = sum(1 for i in issues_create if i.severity == "error")
         ready_count = sum(1 for r in staging_rows_create if r.review_status == "ready")
-        pending_count = sum(1 for r in staging_rows_create if r.review_status == "pending_review")
-        needs_corr_count = sum(1 for r in staging_rows_create if r.review_status == "needs_correction")
+        pending_count = sum(
+            1 for r in staging_rows_create if r.review_status == "pending_review"
+        )
+        needs_corr_count = sum(
+            1 for r in staging_rows_create if r.review_status == "needs_correction"
+        )
 
         yield format_sse(
             "validation_result",
@@ -1010,7 +1280,10 @@ async def process_multi_photo_submission_stream(
             },
         )
 
-        yield format_sse("report_status", {"step": "staging", "message": "Persisting staging records..."})
+        yield format_sse(
+            "report_status",
+            {"step": "staging", "message": "Persisting staging records..."},
+        )
 
         created_rows, created_issues, summary = _persist_staging_rows_and_issues(
             db=db,
@@ -1041,7 +1314,10 @@ async def process_multi_photo_submission_stream(
         logger.error(f"Error during photo staging: {e}", exc_info=True)
         submission.status = "failed"
         db.commit()
-        yield format_sse("report_error", {"error_code": ErrorCodeRegistry.RPT_PROCESSING_ERROR, "message": str(e)})
+        yield format_sse(
+            "report_error",
+            {"error_code": ErrorCodeRegistry.RPT_PROCESSING_ERROR, "message": str(e)},
+        )
 
 
 async def process_photo_submission_stream(

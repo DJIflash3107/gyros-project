@@ -1,6 +1,7 @@
 import traceback
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.configs.settings import settings
 from app.helpers.logging import setup_logging, logger, error_code_var
@@ -38,7 +39,6 @@ from app.routes import (
 )
 
 
-
 from contextlib import asynccontextmanager
 from app.configs.amd_client import close_amd_client
 
@@ -60,6 +60,13 @@ app = FastAPI(
 
 # Middleware
 app.add_middleware(RequestContextMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # Exception Handlers
@@ -83,7 +90,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         field = str(loc[-1]) if loc else "request"
         msg = err.get("msg", "Invalid value")
         if msg.startswith("Value error, "):
-            msg = msg[len("Value error, "):]
+            msg = msg[len("Value error, ") :]
         errors_dict[field] = msg
 
     error_code_var.set("ERR-42200")
@@ -152,5 +159,3 @@ app.include_router(promotion_router)
 app.include_router(direct_promotion_router)
 app.include_router(artifact_router)
 app.include_router(direct_artifact_router)
-
-

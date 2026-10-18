@@ -8,7 +8,12 @@ import {
   Bars3CenterLeftIcon,
   Bars3Icon,
   CalendarIcon,
+  ShieldCheckIcon,
+  TagIcon,
 } from "@heroicons/react/24/outline";
+import { useBusiness } from "../context/BusinessContext";
+import { clearToken } from "../services/apiClient";
+import AgentChatWidget from "./AgentChatWidget";
 
 const nav = [
   { path: "/overview", label: "Overview", Icon: HomeIcon },
@@ -16,6 +21,8 @@ const nav = [
   { path: "/inventory", label: "Inventory & Stocks", Icon: ClipboardDocumentListIcon },
   { path: "/sales", label: "Sales", Icon: ShoppingCartIcon },
   { path: "/prep-planner", label: "Prep Planner", Icon: QueueListIcon },
+  { path: "/promotions", label: "Promotions", Icon: TagIcon },
+  { path: "/data-validation", label: "Data Validation", Icon: ShieldCheckIcon },
 ];
 
 function getPageTitle(pathname: string) {
@@ -35,9 +42,25 @@ export default function SidebarLayout({
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const pageTitle = getPageTitle(pathname);
+  const { businesses, activeBusiness, setActiveBusiness, clear } =
+    useBusiness();
 
   const handleLogout = () => {
-    navigate("/");
+    clearToken();
+    clear();
+    navigate("/login");
+  };
+
+  const handleBusinessChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = event.target.value;
+    if (value === "new") {
+      navigate("/businesses/new");
+      return;
+    }
+    const next = businesses.find((b) => b.id === Number(value));
+    if (next) {
+      setActiveBusiness(next);
+    }
   };
 
   useEffect(() => {
@@ -103,6 +126,20 @@ export default function SidebarLayout({
           ))}
         </nav>
         <div className={`border-t border-blue-900 ${isOpen ? "p-3" : "p-2"}`}>
+          {isOpen && (
+            <select
+              value={activeBusiness?.id ?? ""}
+              onChange={handleBusinessChange}
+              className="mb-3 w-full rounded-lg border border-blue-800 bg-blue-900 px-2 py-1.5 text-sm text-white focus:outline-none"
+            >
+              {businesses.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+              <option value="new">+ New business</option>
+            </select>
+          )}
           <div className={`flex items-center overflow-hidden ${isOpen ? "gap-3" : "justify-center"}`}>
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-800 font-semibold text-sm">
               JD
@@ -129,6 +166,7 @@ export default function SidebarLayout({
         </header>
         <main className="flex-1 overflow-y-auto p-8">{children}</main>
       </div>
+      <AgentChatWidget />
     </div>
   );
 }
