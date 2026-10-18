@@ -479,6 +479,7 @@ class ReportGeneratorService:
                 func.sum(Expense.amount).label("total_amount"),
             )
             .where(Expense.business_id == business_id)
+            .where(Expense.status == "active")
             .group_by(Expense.category)
         )
         if request.start_date:

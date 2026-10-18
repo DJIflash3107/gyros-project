@@ -95,7 +95,7 @@ def test_normalize_category():
 
 
 # 2. Integration Tests: Spreadsheet Import (Excel & CSV)
-def test_import_expenses_excel_preview_and_persist(client, auth_user, db_session, monkeypatch):
+def test_import_expenses_excel_draft_and_approval(client, auth_user, db_session, monkeypatch):
     monkeypatch.setattr(settings, "SEMANTIC_MAPPING_ENABLED", False)
     headers = auth_user["headers"]
 
@@ -116,50 +116,73 @@ def test_import_expenses_excel_preview_and_persist(client, auth_user, db_session
         sheet_name="Pengeluaran",
     )
 
-    # 1. Preview Mode (persist=false)
-    resp_preview = client.post(
+    # 1. Import creates draft expenses
+    resp_import = client.post(
         f"/api/v1/businesses/{biz_id}/expenses/import",
         data={
             "input_method": "spreadsheet",
             "branch_id": branch_id,
-            "persist": "false",
         },
         files={"file": ("expenses.xlsx", xlsx_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
         headers=headers,
     )
-    assert resp_preview.status_code == 200
-    body_preview = resp_preview.json()["data"]
-    assert body_preview["summary"]["total_extracted"] == 3
-    assert body_preview["summary"]["total_saved"] == 0
-    assert body_preview["summary"]["persisted"] is False
-    assert len(body_preview["items"]) == 3
-    assert body_preview["items"][2]["category"] == "Utilities"  # Inferred from "Token Listrik PLN"
+    assert resp_import.status_code == 201
+    body_import = resp_import.json()["data"]
+    assert body_import["summary"]["total_extracted"] == 3
+    assert body_import["summary"]["total_saved"] == 3
+    assert body_import["summary"]["status"] == "draft"
+    assert len(body_import["expenses"]) == 3
+    assert all(e["status"] == "draft" for e in body_import["expenses"])
+    assert len(body_import["items"]) == 3
 
-    # Verify nothing was persisted yet
-    assert db_session.query(Expense).filter(Expense.business_id == biz_id).count() == 0
-
-    # 2. Persist Mode (persist=true)
-    resp_persist = client.post(
-        f"/api/v1/businesses/{biz_id}/expenses/import",
-        data={
-            "input_method": "spreadsheet",
-            "branch_id": branch_id,
-            "persist": "true",
-        },
-        files={"file": ("expenses.xlsx", xlsx_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        headers=headers,
-    )
-    assert resp_persist.status_code == 201
-    body_persist = resp_persist.json()["data"]
-    assert body_persist["summary"]["total_extracted"] == 3
-    assert body_persist["summary"]["total_saved"] == 3
-    assert body_persist["summary"]["persisted"] is True
-    assert float(body_persist["summary"]["total_amount"]) == 1925000.0
-    assert len(body_persist["expenses"]) == 3
-
-    # Verify database records
+    # Database records exist with status 'draft'
     db_expenses = db_session.query(Expense).filter(Expense.business_id == biz_id).all()
     assert len(db_expenses) == 3
+    assert all(e.status == "draft" for e in db_expenses)
+
+    # 2. List expenses defaults to active -> should return 0 active
+    list_active = client.get(f"/api/v1/businesses/{biz_id}/expenses", headers=headers)
+    assert list_active.status_code == 200
+    assert list_active.json()["data"]["pagination"]["total"] == 0
+    assert len(list_active.json()["data"]["expenses"]) == 0
+
+    # List expenses with status=draft -> returns all 3
+    list_draft = client.get(f"/api/v1/businesses/{biz_id}/expenses?status=draft", headers=headers)
+    assert list_draft.status_code == 200
+    assert list_draft.json()["data"]["pagination"]["total"] == 3
+    assert len(list_draft.json()["data"]["expenses"]) == 3
+
+    # 3. Approve first 2 expenses -> transitions standalone drafts to 'active'
+    exp_ids = [db_expenses[0].id, db_expenses[1].id]
+    discard_id = [db_expenses[2].id]
+
+    appr_resp = client.post(
+        f"/api/v1/businesses/{biz_id}/expenses/approve",
+        json={"expense_ids": exp_ids},
+        headers=headers,
+    )
+    assert appr_resp.status_code == 200
+    assert appr_resp.json()["data"]["updated_count"] == 2
+    for exp_item in appr_resp.json()["data"]["expenses"]:
+        assert exp_item["status"] == "active"
+
+    # 4. Discard the 3rd draft expense
+    disc_resp = client.post(
+        f"/api/v1/businesses/{biz_id}/expenses/discard",
+        json={"expense_ids": discard_id},
+        headers=headers,
+    )
+    assert disc_resp.status_code == 200
+    assert disc_resp.json()["data"]["deleted_count"] == 1
+
+    # Verify active list now has exactly 2
+    list_active_after = client.get(f"/api/v1/businesses/{biz_id}/expenses", headers=headers)
+    assert list_active_after.status_code == 200
+    assert list_active_after.json()["data"]["pagination"]["total"] == 2
+    assert len(list_active_after.json()["data"]["expenses"]) == 2
+
+    # Verify discarded expense is gone from database
+    assert db_session.query(Expense).filter(Expense.id == discard_id[0]).first() is None
 
 
 def test_import_expenses_csv(client, auth_user, db_session, monkeypatch):
@@ -178,7 +201,6 @@ def test_import_expenses_csv(client, auth_user, db_session, monkeypatch):
         f"/api/v1/businesses/{biz_id}/expenses/import",
         data={
             "input_method": "spreadsheet",
-            "persist": "true",
         },
         files={"file": ("expenses.csv", csv_content, "text/csv")},
         headers=headers,
@@ -187,6 +209,18 @@ def test_import_expenses_csv(client, auth_user, db_session, monkeypatch):
     body = resp.json()["data"]
     assert body["summary"]["total_saved"] == 2
     assert float(body["summary"]["total_amount"]) == 470000.0
+    assert all(e["status"] == "draft" for e in body["expenses"])
+
+    # Approve both
+    exp_ids = [e["id"] for e in body["expenses"]]
+    appr_resp = client.post(
+        f"/api/v1/businesses/{biz_id}/expenses/approve",
+        json={"expense_ids": exp_ids},
+        headers=headers,
+    )
+    assert appr_resp.status_code == 200
+    assert appr_resp.json()["data"]["updated_count"] == 2
+    assert all(e["status"] == "active" for e in appr_resp.json()["data"]["expenses"])
 
 
 # 3. Integration Tests: Photo OCR Receipt Import
@@ -228,7 +262,6 @@ async def test_import_expenses_photo_ocr(client, auth_user, db_session, monkeypa
             f"/api/v1/businesses/{biz_id}/expenses/import",
             data={
                 "input_method": "photo",
-                "persist": "true",
             },
             files={"file": ("receipt.jpg", fake_img, "image/jpeg")},
             headers=headers,
@@ -238,7 +271,17 @@ async def test_import_expenses_photo_ocr(client, auth_user, db_session, monkeypa
         assert body["summary"]["total_saved"] == 1
         assert float(body["summary"]["total_amount"]) == 750000.0
         assert body["expenses"][0]["category"] == "Ingredients"
+        assert body["expenses"][0]["status"] == "draft"
         assert "Toko Sumber Rejeki" in body["expenses"][0]["description"]
+
+        # Approve
+        appr_resp = client.post(
+            f"/api/v1/businesses/{biz_id}/expenses/approve",
+            json={"expense_ids": [body["expenses"][0]["id"]]},
+            headers=headers,
+        )
+        assert appr_resp.status_code == 200
+        assert appr_resp.json()["data"]["expenses"][0]["status"] == "active"
 
 
 # 4. Multi-Sheet Workbook with Sales and Expenses Integration
@@ -293,12 +336,47 @@ def test_multi_sheet_workbook_with_expenses(client, auth_user, db_session, monke
     assert body["summary"]["expenses_extracted"] == 2
     assert float(body["summary"]["expenses_total_amount"]) == 450000.0
 
-    # Verify expenses are saved in database linked to source_submission_id
+    # Verify expenses are saved in database linked to source_submission_id with status 'draft'
     expenses = db_session.query(Expense).filter(Expense.source_submission_id == sub_id).all()
     assert len(expenses) == 2
+    assert all(e.status == "draft" for e in expenses)
     exp_cats = {e.category for e in expenses}
     assert "Ingredients" in exp_cats
     assert "Utilities" in exp_cats  # "Listrik Token" auto-mapped to Utilities
+
+    # Attempt to confirm submission while expenses are still draft -> should fail with 422
+    fail_confirm = client.post(
+        f"/api/v1/businesses/{biz_id}/sales_report_submissions/{sub_id}/confirm",
+        headers=headers,
+    )
+    assert fail_confirm.status_code == 422
+    assert "draft expense" in str(fail_confirm.json()).lower()
+
+    # User reviews and approves expenses -> status becomes 'ready' because linked to submission
+    exp_ids = [e.id for e in expenses]
+    appr_resp = client.post(
+        f"/api/v1/businesses/{biz_id}/expenses/approve",
+        json={"expense_ids": exp_ids},
+        headers=headers,
+    )
+    assert appr_resp.status_code == 200
+    assert appr_resp.json()["data"]["updated_count"] == 2
+    assert all(e["status"] == "ready" for e in appr_resp.json()["data"]["expenses"])
+
+    for e in expenses:
+        db_session.refresh(e)
+        assert e.status == "ready"
+
+    # Confirm sales report submission -> transitions linked 'ready' expenses to 'active'
+    confirm_resp = client.post(
+        f"/api/v1/businesses/{biz_id}/sales_report_submissions/{sub_id}/confirm",
+        headers=headers,
+    )
+    assert confirm_resp.status_code == 200
+
+    for e in expenses:
+        db_session.refresh(e)
+        assert e.status == "active"
 
 
 # 5. Error Handling Tests
@@ -500,57 +578,53 @@ def test_preview_correct_and_batch_save_workflow(client, auth_user, db_session, 
         ],
     )
 
-    # 1. Preview mode (persist=false)
-    resp_preview = client.post(
+    # 1. Import creates draft expenses
+    resp_import = client.post(
         f"/api/v1/businesses/{biz_id}/expenses/import",
         data={
             "input_method": "spreadsheet",
             "branch_id": branch_id,
-            "persist": "false",
         },
         files={"file": ("expenses.xlsx", xlsx_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
         headers=headers,
     )
-    assert resp_preview.status_code == 200
-    preview_items = resp_preview.json()["data"]["items"]
-    assert len(preview_items) == 2
-    assert db_session.query(Expense).filter(Expense.business_id == biz_id).count() == 0
+    assert resp_import.status_code == 201
+    created_expenses = resp_import.json()["data"]["expenses"]
+    assert len(created_expenses) == 2
+    assert all(e["status"] == "draft" for e in created_expenses)
 
-    # 2. Simulate User correcting the second item's category and description
-    corrected_items = [
-        {
-            "branch_id": preview_items[0]["branch_id"],
-            "expense_date": preview_items[0]["expense_date"],
-            "category": preview_items[0]["category"],
-            "description": preview_items[0]["description"],
-            "amount": preview_items[0]["amount"],
-            "currency": preview_items[0]["currency"],
-        },
-        {
-            "branch_id": branch_id,
-            "expense_date": "2026-10-02",
+    exp1_id = created_expenses[0]["id"]
+    exp2_id = created_expenses[1]["id"]
+
+    # 2. Simulate User reviewing and correcting the second item's category and description via PATCH
+    patch_resp = client.patch(
+        f"/api/v1/businesses/{biz_id}/expenses/{exp2_id}",
+        json={
             "category": "Maintenance",  # Corrected from Operations
-            "description": "Perbaikan Pintu Gudang Toko",  # Corrected description
-            "amount": "120000.00",
-            "currency": "IDR",
+            "description": "Perbaikan Pintu Gudang Toko",
         },
-    ]
-
-    # 3. Save corrected batch directly via POST /expenses/batch
-    resp_batch = client.post(
-        f"/api/v1/businesses/{biz_id}/expenses/batch",
-        json={"items": corrected_items},
         headers=headers,
     )
-    assert resp_batch.status_code == 201
-    batch_data = resp_batch.json()["data"]
-    assert batch_data["summary"]["total_saved"] == 2
-    assert float(batch_data["summary"]["total_amount"]) == 470000.0
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["data"]["expense"]["category"] == "Maintenance"
+    assert patch_resp.json()["data"]["expense"]["description"] == "Perbaikan Pintu Gudang Toko"
+
+    # 3. User approves both draft expenses
+    appr_resp = client.post(
+        f"/api/v1/businesses/{biz_id}/expenses/approve",
+        json={"expense_ids": [exp1_id, exp2_id]},
+        headers=headers,
+    )
+    assert appr_resp.status_code == 200
+    assert appr_resp.json()["data"]["updated_count"] == 2
+    assert all(e["status"] == "active" for e in appr_resp.json()["data"]["expenses"])
 
     # 4. Verify in DB
     db_items = db_session.query(Expense).filter(Expense.business_id == biz_id).order_by(Expense.id.asc()).all()
     assert len(db_items) == 2
+    assert db_items[0].status == "active"
     assert db_items[0].category == "Ingredients"
+    assert db_items[1].status == "active"
     assert db_items[1].category == "Maintenance"
     assert db_items[1].description == "Perbaikan Pintu Gudang Toko"
 

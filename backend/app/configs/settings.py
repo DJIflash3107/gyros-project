@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     AMD_REQUEST_TIMEOUT: int = 600
     AMD_STREAM_CHUNK_TIMEOUT: int = 600
     AMD_MAX_RETRIES: int = 3
+    AMD_RPM_LIMIT: int = 18
+    AMD_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    AMD_MAX_CONCURRENT_REQUESTS: int = 4
 
     # Agent Configuration
     AGENT_MAX_TURNS: int = 10
@@ -47,6 +50,8 @@ class Settings(BaseSettings):
     ARTIFACT_STORAGE_S3_ENDPOINT: str = ""
     ARTIFACT_STORAGE_S3_ACCESS_KEY: str = ""
     ARTIFACT_STORAGE_S3_SECRET_KEY: str = ""
+
+    BACKGROUND_JOB_STORAGE_DIR: str = "storage/background-jobs"
 
     # Image Generation Configuration
     IMAGE_GEN_ENABLED: bool = True

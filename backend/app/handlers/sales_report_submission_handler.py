@@ -2,7 +2,7 @@ import hashlib
 from datetime import date
 from typing import Optional, Union, List, Tuple
 from fastapi import UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from app.models.user import User
 from app.models.schemas.sales_report_submission import (
@@ -112,24 +112,14 @@ def delete_submission_handler(
     )
 
 
-def confirm_submission_handler(
-    business_id: int,
-    submission_id: int,
-    current_user: User,
-    db: Session,
-) -> JSONResponse:
-    submission = sales_report_submission_service.confirm_submission(
-        db, business_id, submission_id, current_user
-    )
-    return success_response(
-        message="Sales report submission confirmed and finalized successfully",
-        data={
-            "submission": SalesReportSubmissionResponse.model_validate(
-                submission
-            ).model_dump()
-        },
-    )
-
+def confirm_submission_handler(business_id: int, submission_id: int, current_user: User, db: Session) -> JSONResponse:
+    from app.services.background_job_service import enqueue_job
+    job = enqueue_job(db, business_id, current_user.id, "sales_report_confirm", {"submission_id": submission_id})
+    return success_response("Sales report confirmation queued", {
+        "job_id": job['id'],
+        "status": job["status"],
+        "status_url": f"/api/v1/businesses/{business_id}/jobs/{job['id']}",
+    }, status_code=202)
 
 async def process_submission_handler(
     business_id: int,
@@ -142,7 +132,10 @@ async def process_submission_handler(
     current_user: User,
     db: Session,
     stream: Optional[bool] = None,
-) -> Union[JSONResponse, StreamingResponse]:
+) -> JSONResponse:
+    from app.services.background_job_service import enqueue_job
+    from app.services.background_job_worker import delete_upload, store_upload
+
     if coverage_end < coverage_start:
         raise ValidationException(
             errors={
@@ -150,186 +143,50 @@ async def process_submission_handler(
             },
             message="Request validation failed",
         )
-
-    if not files:
+    if input_method not in ("spreadsheet", "photo"):
         raise ValidationException(
-            errors={"file": "At least one file is required"},
-            message="No upload file provided",
-        )
-
-    if input_method == "spreadsheet":
-        primary_file = files[0]
-        file_bytes = await primary_file.read()
-        file_name = primary_file.filename or "upload"
-        mime_type = primary_file.content_type or "application/octet-stream"
-
-        if stream:
-            events = (
-                sales_report_processing_service.process_spreadsheet_submission_stream(
-                    db=db,
-                    business_id=business_id,
-                    current_user=current_user,
-                    file_bytes=file_bytes,
-                    file_name=file_name,
-                    mime_type=mime_type,
-                    report_period_type=report_period_type,
-                    coverage_start=coverage_start,
-                    coverage_end=coverage_end,
-                    branch_id=branch_id,
-                )
-            )
-            return StreamingResponse(iter(events), media_type="text/event-stream")
-
-        result = sales_report_processing_service.process_file_submission(
-            db=db,
-            business_id=business_id,
-            current_user=current_user,
-            file_bytes=file_bytes,
-            file_name=file_name,
-            mime_type=mime_type,
-            input_method="spreadsheet",
-            report_period_type=report_period_type,
-            coverage_start=coverage_start,
-            coverage_end=coverage_end,
-            branch_id=branch_id,
-        )
-        return success_response(
-            message="Spreadsheet processed and staged successfully",
-            data=result.model_dump(),
-            status_code=201,
-        )
-
-    elif input_method == "photo":
-        if len(files) > settings.VISION_MAX_IMAGES_PER_SUBMISSION:
-            raise ValidationException(
-                errors={
-                    "files": f"Maximum {settings.VISION_MAX_IMAGES_PER_SUBMISSION} images per submission (received {len(files)})"
-                },
-                message="Too many images",
-            )
-
-        max_img_bytes = settings.VISION_MAX_IMAGE_SIZE_MB * 1024 * 1024
-        images: List[Tuple[bytes, str, str]] = []
-
-        for idx, f in enumerate(files, start=1):
-            f_bytes = await f.read()
-            f_name = f.filename or f"image_{idx}.jpg"
-            f_mime = f.content_type or "image/jpeg"
-
-            if len(f_bytes) > max_img_bytes:
-                raise ValidationException(
-                    errors={
-                        "file": f"Image '{f_name}' exceeds maximum size limit of {settings.VISION_MAX_IMAGE_SIZE_MB}MB",
-                        "error_code": ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
-                    },
-                    message="Image exceeds size limit",
-                    error_code=ErrorCodeRegistry.RPT_IMAGE_TOO_LARGE,
-                )
-
-            if not (
-                f_mime.startswith("image/")
-                or any(
-                    f_name.lower().endswith(ext)
-                    for ext in (".jpg", ".jpeg", ".png", ".webp")
-                )
-            ):
-                raise ValidationException(
-                    errors={
-                        "file": f"File '{f_name}' is not a supported image format (JPEG, PNG, WEBP)",
-                        "error_code": ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
-                    },
-                    message="Unsupported file format",
-                    error_code=ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
-                )
-
-            images.append((f_bytes, f_name, f_mime))
-
-        # Check AI configuration and vision model availability
-        if not settings.AMD_API_KEY and settings.APP_ENV not in ("testing", "test"):
-            raise AIConfigException(
-                errors={
-                    "vision": "AI service is not configured. Please configure AMD_API_KEY.",
-                    "error_code": ErrorCodeRegistry.RPT_VISION_UNAVAILABLE,
-                },
-                message="Vision model is unavailable",
-                error_code=ErrorCodeRegistry.RPT_VISION_UNAVAILABLE,
-            )
-
-        if not settings.VISION_MODEL_OVERRIDE:
-            try:
-                client = get_amd_client()
-                models = await list_models(client)
-                has_vision = any(getattr(m, "supports_vision", False) for m in models)
-            except Exception as e:
-                raise AIConfigException(
-                    errors={
-                        "vision": f"Failed to discover vision models: {str(e)}",
-                        "error_code": ErrorCodeRegistry.RPT_VISION_UNAVAILABLE,
-                    },
-                    message="Vision model is unavailable",
-                    error_code=ErrorCodeRegistry.RPT_VISION_UNAVAILABLE,
-                )
-            if not has_vision:
-                raise AIConfigException(
-                    errors={
-                        "vision": "No vision-capable model is available in the configured AI catalog",
-                        "error_code": ErrorCodeRegistry.RPT_VISION_UNAVAILABLE,
-                    },
-                    message="No vision-capable model is available",
-                    error_code=ErrorCodeRegistry.RPT_VISION_UNAVAILABLE,
-                )
-
-        # Check duplicate file/submission before processing
-        combined_hash = hashlib.sha256()
-        for img_bytes, _, _ in images:
-            combined_hash.update(hashlib.sha256(img_bytes).digest())
-        sha256_hex = combined_hash.hexdigest()
-        sales_report_processing_service.check_duplicate_submission(
-            db, business_id, sha256_hex
-        )
-
-        # If stream is explicitly False, process synchronously and return JSON
-        if stream is False:
-            result = sales_report_processing_service.process_multi_photo_submission(
-                db=db,
-                business_id=business_id,
-                current_user=current_user,
-                images=images,
-                report_period_type=report_period_type,
-                coverage_start=coverage_start,
-                coverage_end=coverage_end,
-                branch_id=branch_id,
-            )
-            return success_response(
-                message="Photo processed and staged successfully",
-                data=result.model_dump(),
-                status_code=201,
-            )
-
-        # Otherwise, stream SSE progress
-        generator = (
-            sales_report_processing_service.process_multi_photo_submission_stream(
-                db=db,
-                business_id=business_id,
-                current_user=current_user,
-                images=images,
-                report_period_type=report_period_type,
-                coverage_start=coverage_start,
-                coverage_end=coverage_end,
-                branch_id=branch_id,
-            )
-        )
-        return StreamingResponse(generator, media_type="text/event-stream")
-
-    else:
-        raise ValidationException(
-            errors={
-                "input_method": f"Invalid input_method '{input_method}'. Supported: spreadsheet, photo",
-                "error_code": ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
-            },
+            errors={"input_method": "Supported values: spreadsheet, photo"},
             message="Invalid input method",
-            error_code=ErrorCodeRegistry.RPT_UNSUPPORTED_FORMAT,
         )
+    if not files:
+        raise ValidationException(errors={"file": "At least one file is required"}, message="No upload file provided")
+    if input_method == "spreadsheet" and len(files) != 1:
+        raise ValidationException(errors={"files": "Spreadsheet processing accepts one file"}, message="Invalid file count")
+    if input_method == "photo" and len(files) > settings.VISION_MAX_IMAGES_PER_SUBMISSION:
+        raise ValidationException(
+            errors={"files": f"Maximum {settings.VISION_MAX_IMAGES_PER_SUBMISSION} images per submission"},
+            message="Too many images",
+        )
+
+    stored = []
+    try:
+        for index, upload in enumerate(files, start=1):
+            content = await upload.read()
+            filename = upload.filename or f"upload_{index}"
+            mime_type = upload.content_type or "application/octet-stream"
+            if input_method == "spreadsheet" and len(content) > sales_report_processing_service.MAX_SPREADSHEET_BYTES:
+                raise ValidationException(errors={"file": "Spreadsheet exceeds maximum size limit of 10MB"}, message="File exceeds size limit")
+            if input_method == "photo" and len(content) > settings.VISION_MAX_IMAGE_SIZE_MB * 1024 * 1024:
+                raise ValidationException(errors={"file": f"Image '{filename}' exceeds maximum size limit"}, message="Image exceeds size limit")
+            storage_key = store_upload(business_id, filename, content)
+            stored.append({"storage_key": storage_key, "filename": filename, "mime_type": mime_type})
+        job = enqueue_job(db, business_id, current_user.id, "sales_report_process", {
+            "files": stored,
+            "input_method": input_method,
+            "report_period_type": report_period_type,
+            "coverage_start": coverage_start.isoformat(),
+            "coverage_end": coverage_end.isoformat(),
+            "branch_id": branch_id,
+        })
+    except Exception:
+        for item in stored:
+            delete_upload(item["storage_key"])
+        raise
+    return success_response("Sales report processing queued", {
+        "job_id": job['id'],
+        "status": job["status"],
+        "status_url": f"/api/v1/businesses/{business_id}/jobs/{job['id']}",
+    }, status_code=202)
 
 
 def batch_form_handler(
@@ -338,14 +195,10 @@ def batch_form_handler(
     current_user: User,
     db: Session,
 ) -> JSONResponse:
-    result = sales_report_processing_service.process_manual_form_batch(
-        db=db,
-        business_id=business_id,
-        current_user=current_user,
-        batch_data=data,
-    )
-    return success_response(
-        message="Batch manual form submission processed and staged successfully",
-        data=result.model_dump(),
-        status_code=201,
-    )
+    from app.services.background_job_service import enqueue_job
+    job = enqueue_job(db, business_id, current_user.id, "sales_report_batch_form", {"data": data.model_dump(mode="json")})
+    return success_response("Sales report batch queued", {
+        "job_id": job['id'],
+        "status": job["status"],
+        "status_url": f"/api/v1/businesses/{business_id}/jobs/{job['id']}",
+    }, status_code=202)

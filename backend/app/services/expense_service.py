@@ -35,6 +35,7 @@ def create_expense(
         currency=data.currency,
         source_submission_id=data.source_submission_id,
         source_row_number=data.source_row_number,
+        status=data.status if getattr(data, "status", None) else "active",
         created_by_user_id=current_user.id,
     )
     db.add(expense)
@@ -72,6 +73,7 @@ def create_expenses_batch(
             currency=item.currency,
             source_submission_id=item.source_submission_id,
             source_row_number=item.source_row_number,
+            status=item.status if getattr(item, "status", None) else "active",
             created_by_user_id=current_user.id,
         )
         for item in items
@@ -89,12 +91,97 @@ def create_expenses_batch(
     return expenses_to_add, summary
 
 
+def approve_expenses(
+    db: Session,
+    business_id: int,
+    expense_ids: list[int],
+) -> Tuple[list[Expense], int]:
+    """
+    Approve draft expenses after user review:
+    - If expense has source_submission_id -> status becomes 'ready'
+    - If standalone expense (source_submission_id is None) -> status becomes 'active'
+    """
+    expenses = db.query(Expense).filter(
+        Expense.id.in_(expense_ids),
+        Expense.business_id == business_id,
+        Expense.status == "draft",
+    ).all()
+
+    if not expenses:
+        raise NotFoundException(
+            message="No draft expenses found to approve",
+            errors={"expense_ids": f"No draft expenses with IDs {expense_ids} found in business {business_id}"},
+        )
+
+    updated = []
+    for exp in expenses:
+        if exp.source_submission_id is not None:
+            exp.status = "ready"
+        else:
+            exp.status = "active"
+        updated.append(exp)
+
+    db.commit()
+    for exp in updated:
+        db.refresh(exp)
+    return updated, len(updated)
+
+
+def activate_expenses_by_submission(
+    db: Session,
+    business_id: int,
+    submission_id: int,
+) -> int:
+    """
+    Transition all expenses with status 'ready' linked to submission_id to 'active'.
+    Called when SalesReportSubmission is confirmed.
+    """
+    ready_expenses = db.query(Expense).filter(
+        Expense.business_id == business_id,
+        Expense.source_submission_id == submission_id,
+        Expense.status == "ready",
+    ).all()
+
+    count = len(ready_expenses)
+    for exp in ready_expenses:
+        exp.status = "active"
+
+    return count
+
+
+def discard_draft_expenses(
+    db: Session,
+    business_id: int,
+    expense_ids: list[int],
+) -> int:
+    """
+    Discard (delete) draft expenses that were rejected during user review.
+    """
+    expenses = db.query(Expense).filter(
+        Expense.id.in_(expense_ids),
+        Expense.business_id == business_id,
+        Expense.status == "draft",
+    ).all()
+
+    if not expenses:
+        raise NotFoundException(
+            message="No draft expenses found to discard",
+            errors={"expense_ids": f"No draft expenses with IDs {expense_ids} found in business {business_id}"},
+        )
+
+    count = len(expenses)
+    for exp in expenses:
+        db.delete(exp)
+    db.commit()
+    return count
+
 
 def list_expenses(
     db: Session,
     business_id: int,
     branch_id: Optional[int] = None,
     category: Optional[str] = None,
+    status: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
 ) -> Tuple[list[Expense], dict]:
@@ -103,6 +190,11 @@ def list_expenses(
         query = query.filter(Expense.branch_id == branch_id)
     if category is not None:
         query = query.filter(Expense.category == category)
+    if status is not None:
+        if status != "all":
+            query = query.filter(Expense.status == status)
+    else:
+        query = query.filter(Expense.status == "active")
     query = query.order_by(Expense.expense_date.desc(), Expense.id.desc())
     return paginate_query(query, page, page_size)
 

@@ -37,7 +37,7 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - **Explicit Confirmation**: Safe transition from staging rows into immutable confirmed observations (`SalesReportObservation`) via authenticated `POST .../{submission_id}/confirm`.
   - **Centralized Validation Engine**: 12 automated business integrity checks including product alias resolution, branch validation, date range coverage, non-negative bounds, intra-batch duplicate detection, cross-submission observation overlap protection, and draft activation warnings.
   - **SHA-256 Deduplication**: File hashing blocks accidental re-upload of active submissions.
-  - **Real-Time Progress Streaming**: SSE streaming for photo extraction and long-running validation tasks (`report_status`, `extraction_progress`, `validation_result`, `report_complete`, `report_error`).
+  - **Asynchronous Processing**: Long-running ingestion, manual batches, confirmation, bulk staging updates, and expense import/batch writes return `202 Accepted`; poll the returned job status URL for progress and result.
 - **Dynamic Profiling & LLM Semantic Mapping**:
   - Layout-agnostic spreadsheet parsing powered by AMD Token Factory LLMs.
   - Automatic inspection of sheet names, raw headers, sample rows, inferred data types, and merged cells.
@@ -63,17 +63,20 @@ A production-grade REST API backend built with **FastAPI**, **SQLAlchemy 2.0**, 
   - Authenticated download endpoints supporting both Bearer JWT and short-lived HMAC-SHA256 signed download tokens (default 30 min expiry).
   - Zero placeholder policy: no empty, corrupt, or partial files are written on any failure; failed attempts are recorded in the database with descriptive error messages.
   - Fully integrated into the Business Operations Agent via the `invoke_artifact_service` tool.
-- **Expense Import & Batch Management**:
-  - Ingests business expenses from spreadsheets (`.xlsx`, `.csv`) and physical receipt/nota photos (AMD Vision OCR).
-  - **AI Dynamic Semantic Mapping as Primary**: Automatically maps arbitrary raw column headers to canonical expense fields using AMD Token Factory LLMs with robust deterministic fallback.
-  - **AI Semantic Categorization**: Batch-categorizes expense transaction descriptions into 9 standardized English categories with keyword fallback.
+- **Expense Import & Review**:
+  - Imports one or more spreadsheets (`.xlsx`, `.xls`, `.csv`) or receipt/nota photos through `POST /api/v1/businesses/{business_id}/expenses/import`; legacy single `file` and multi-file `files` fields are accepted.
+  - Import runs as an in-process background job and always saves extracted rows as `draft` expenses. `persist` form value does not change this behavior.
+  - Poll the returned job status URL for extraction summary, saved draft expenses, issues, or failure. Review drafts through `GET /expenses?status=draft`, then approve (`POST /expenses/approve`) or discard (`POST /expenses/discard`).
+  - **AI Dynamic Semantic Mapping as Primary**: Maps arbitrary raw spreadsheet headers to canonical expense fields using AMD Token Factory LLMs with deterministic fallback.
+  - **AI Semantic Categorization**: Categorizes transaction descriptions into 9 standardized English categories with keyword fallback.
   - **Standardized English Categories**: `Ingredients`, `Packaging`, `Utilities`, `Salaries & Wages`, `Maintenance`, `Marketing`, `Rent & Facilities`, `Operations`, `Other`.
-  - **Two-Phase Review & Batch Ingestion Workflow**: Dry-run preview (`persist=false`) allows client inspection and inline field correction in UI/JSON without saving to DB; corrected records are saved atomically in one transaction via `POST /api/v1/businesses/{id}/expenses/batch`.
+  - **Asynchronous Batch Writes**: JSON batch writes also return `202 Accepted`; poll job status for saved results. Batch writes are separate from import review and create expenses directly (default status `active`).
+  - Expenses imported from sales-report workbooks can be linked to their `source_submission_id`; approval moves linked drafts to `ready`, and confirmation of that sales submission activates them.
 - **AMD Token Factory AI Integration**:
   - Runtime model discovery (`GET /api/v1/ai/models`) with capability flags (streaming, vision, reasoning, tool calling).
   - Operational health & quota check (`GET /api/v1/ai/health`).
   - Chat completions & real-time SSE streaming (`POST /api/v1/ai/chat/completions`).
-  - Exponential backoff with jitter on rate limits (`429`) and gateway saturation (`502`/`503`).
+  - Process-local request pacing (18 RPM) and concurrency cap (4) reduce bursts against AMD's shared 20 RPM / 8 concurrent limits; run one API process for MVP. Honors `Retry-After` and uses exponential backoff with jitter on 429 and gateway saturation (502/503).
   - Graceful degradation: server boots normally without API credentials.
   - Zero placeholder output policy: errors are raised explicitly and traceably.
 - **Database Migrations**: Managed schema versions using **Alembic**.
@@ -281,6 +284,9 @@ AMD_DEFAULT_MODEL=DeepSeek-V4-Flash
 AMD_REQUEST_TIMEOUT=600          # 10 minutes per AMD documentation
 AMD_STREAM_CHUNK_TIMEOUT=600     # Maximum gap between streaming tokens
 AMD_MAX_RETRIES=3                # Retries on 429/502/503
+AMD_RPM_LIMIT=18                  # In-process safety cap below AMD's 20 RPM account limit
+AMD_RATE_LIMIT_WINDOW_SECONDS=60
+AMD_MAX_CONCURRENT_REQUESTS=4     # Shared across this process
 
 # Agent Configuration (LangGraph)
 AGENT_MAX_TURNS=10               # Max tool round-trips per conversation turn
@@ -370,13 +376,16 @@ All API routes are prefixed with `/api/v1`.
 - `GET /api/v1/businesses/{id}/product_cost_history` — Cost history tracking
 - `GET /api/v1/businesses/{id}/product_price_history` — Price history tracking
 - `GET /api/v1/businesses/{id}/expenses` — Expense ledger tracking
-- `POST /api/v1/businesses/{id}/expenses/import` — Ingest expenses from spreadsheets (`.xlsx`, `.csv`) or receipt photos with AI dynamic semantic mapping and AI categorization (preview dry-run with `persist=false` or save with `persist=true`).
-- `POST /api/v1/businesses/{id}/expenses/batch` — Atomically insert a batch of expenses (`ExpenseBatchCreate`) in one database transaction (e.g. after preview inspection and client correction).
+- `POST /api/v1/businesses/{id}/expenses/import` — Queue spreadsheet/photo import (`files` or legacy `file`; `input_method=spreadsheet|photo`, optional `branch_id`, `default_date`, `source_submission_id`). Always persists extracted rows as drafts; `persist` does not control saving. Poll returned `status_url` for result.
+- `GET /api/v1/businesses/{id}/expenses?status=draft` — List imported drafts for review; approve with `POST .../expenses/approve` or discard with `POST .../expenses/discard`.
+- `POST /api/v1/businesses/{id}/expenses/batch` — Queue JSON batch creation, separate from import review; returns a job ID and status URL.
+- `GET /api/v1/businesses/{id}/jobs/{job_id}` — Poll job status, progress, result, or error (in-memory; one API process).
 
 ### Sales Report Ingestion, Staging & Confirmation
-- `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Ingest spreadsheet (`.xlsx`, `.xls`, `.csv`) or photos (supports single `file` or multi-photo `files` up to 10 images) with LLM dynamic semantic mapping, multi-sheet inspection, draft master data auto-creation, and validation.
-- `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` — Batch manual form submission (up to 500 rows).
-- `POST /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}/confirm` — Atomically confirm reviewed staging rows into immutable `SalesReportObservation` records (guards against unactivated draft entities; cleans up orphan drafts).
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` — Queue spreadsheet/photo ingestion (single `file` or up to 10 `files`); returns a job ID and status URL.
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` — Queue manual batch submission (up to 500 rows); returns a job ID and status URL.
+- `POST /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}/confirm` — Queue confirmation of reviewed staging rows into immutable observations.
+- `GET /api/v1/businesses/{business_id}/jobs/{job_id}` — Poll in-process job status, progress, result, or error. Job state is memory-only; restart clears it. Use one API process because worker processes do not share memory.
 - `GET /api/v1/businesses/{business_id}/sales_report_submissions` — List submissions with pagination and status filters (`pending`, `processing`, `reviewed`, `confirmed`, `rejected`).
 - `GET /api/v1/businesses/{business_id}/sales_report_submissions/{submission_id}` — Get submission details and summary counters.
 - `GET /api/v1/sales_report_submissions/{submission_id}/staging_rows` — Query staging rows by review status (`ready`, `pending_review`, `needs_correction`).
@@ -475,3 +484,6 @@ pytest tests/test_auth.py tests/test_authorization.py -v
 For detailed architecture guidelines, coding patterns, response envelope standards, and adding new entities, refer to:
 - [`AGENTS.md`](./AGENTS.md) — The authoritative guide for human and AI developers working on this codebase.
 
+## Background jobs
+
+Heavy operations return HTTP `202` with `job_id` and `status_url`. API process starts each job in a bounded thread pool; poll status URL for progress and result. Job state lives only in process memory, so server restart clears it. Run one API process for this MVP because multiple workers do not share job state. Uploaded files use temporary local storage and are removed after processing.

@@ -1,8 +1,11 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock, patch, MagicMock
+
 import httpx
 import pytest
+
+import app.configs.amd_client as amd_client_module
 from app.configs.amd_client import AMDTokenFactoryClient
 from app.helpers.error_codes import ErrorCodeRegistry
 from app.helpers.exceptions import (
@@ -13,6 +16,16 @@ from app.helpers.exceptions import (
     AuthorizationException,
     ValidationException,
 )
+
+
+@pytest.fixture(autouse=True)
+def fast_process_rate_limiter(monkeypatch):
+    amd_client_module._reset_rate_limiter_for_tests()
+    async def no_wait():
+        return None
+    monkeypatch.setattr(amd_client_module, "_wait_for_rate_slot", no_wait)
+    yield
+    amd_client_module._reset_rate_limiter_for_tests()
 
 
 @pytest.mark.asyncio
@@ -34,18 +47,8 @@ async def test_client_auth_header():
 @pytest.mark.asyncio
 async def test_parse_gateway_error_format():
     client = AMDTokenFactoryClient(api_key="rc-test")
-    raw_error = {
-        "error": {
-            "message": "Requested model DeepSeek-V3 not supported",
-            "type": "invalid_request_error",
-            "code": "model_not_found",
-        }
-    }
-    mock_resp = httpx.Response(
-        status_code=400,
-        content=json.dumps(raw_error).encode(),
-        headers={"content-type": "application/json"},
-    )
+    raw_error = {"error": {"message": "Requested model DeepSeek-V3 not supported", "type": "invalid_request_error", "code": "model_not_found"}}
+    mock_resp = httpx.Response(400, content=json.dumps(raw_error).encode(), headers={"content-type": "application/json"})
     with pytest.raises(ValidationException) as exc_info:
         client._handle_response_error(mock_resp)
     assert "Requested model DeepSeek-V3 not supported" in exc_info.value.message
@@ -55,19 +58,8 @@ async def test_parse_gateway_error_format():
 @pytest.mark.asyncio
 async def test_parse_platform_error_format():
     client = AMDTokenFactoryClient(api_key="rc-test")
-    raw_error = {
-        "detail": {
-            "error": {
-                "message": "Account review pending",
-                "code": "account_not_verified",
-            }
-        }
-    }
-    mock_resp = httpx.Response(
-        status_code=403,
-        content=json.dumps(raw_error).encode(),
-        headers={"content-type": "application/json"},
-    )
+    raw_error = {"detail": {"error": {"message": "Account review pending", "code": "account_not_verified"}}}
+    mock_resp = httpx.Response(403, content=json.dumps(raw_error).encode(), headers={"content-type": "application/json"})
     with pytest.raises(AuthorizationException) as exc_info:
         client._handle_response_error(mock_resp)
     assert "Account review pending" in exc_info.value.message
@@ -77,11 +69,7 @@ async def test_parse_platform_error_format():
 @pytest.mark.asyncio
 async def test_rate_limit_exception_with_retry_after():
     client = AMDTokenFactoryClient(api_key="rc-test")
-    mock_resp = httpx.Response(
-        status_code=429,
-        content=b'{"error": {"message": "Rate limit exceeded. Slow down."}}',
-        headers={"content-type": "application/json", "Retry-After": "60"},
-    )
+    mock_resp = httpx.Response(429, content=b'{"error": {"message": "Rate limit exceeded. Slow down."}}', headers={"content-type": "application/json", "Retry-After": "60"})
     with pytest.raises(AIRateLimitException) as exc_info:
         client._handle_response_error(mock_resp)
     assert exc_info.value.status_code == 429
@@ -92,11 +80,7 @@ async def test_rate_limit_exception_with_retry_after():
 @pytest.mark.asyncio
 async def test_status_401_maps_to_auth_exception():
     client = AMDTokenFactoryClient(api_key="rc-invalid")
-    mock_resp = httpx.Response(
-        status_code=401,
-        content=b'{"error": {"message": "Invalid API key"}}',
-        headers={"content-type": "application/json"},
-    )
+    mock_resp = httpx.Response(401, content=b'{"error": {"message": "Invalid API key"}}', headers={"content-type": "application/json"})
     with pytest.raises(AuthenticationException) as exc_info:
         client._handle_response_error(mock_resp)
     assert exc_info.value.status_code == 401
@@ -106,57 +90,55 @@ async def test_status_401_maps_to_auth_exception():
 @pytest.mark.asyncio
 async def test_retry_on_429_then_succeed():
     client = AMDTokenFactoryClient(api_key="rc-test", max_retries=2)
-    resp_429 = httpx.Response(
-        status_code=429,
-        content=b'{"error": {"message": "Rate limited"}}',
-        headers={"content-type": "application/json", "Retry-After": "0.01"},
-    )
-    resp_200 = httpx.Response(
-        status_code=200,
-        content=b'{"object": "list", "data": [{"id": "DeepSeek-V4-Flash"}]}',
-        headers={"content-type": "application/json"},
-    )
-
+    resp_429 = httpx.Response(429, content=b'{"error": {"message": "Rate limited"}}', headers={"content-type": "application/json", "Retry-After": "0.01"})
+    resp_200 = httpx.Response(200, content=b'{"object": "list", "data": [{"id": "DeepSeek-V4-Flash"}]}', headers={"content-type": "application/json"})
     mock_http = AsyncMock()
     mock_http.request = AsyncMock(side_effect=[resp_429, resp_200])
     mock_http.is_closed = False
-
     with patch.object(client, "_get_http_client", return_value=mock_http):
-        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            res = await client.list_models()
-            assert res["data"][0]["id"] == "DeepSeek-V4-Flash"
-            assert mock_http.request.call_count == 2
-            mock_sleep.assert_called_once()
+        with patch.object(amd_client_module, "_wait_for_rate_slot", new_callable=AsyncMock):
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                res = await client.list_models()
+                assert res["data"][0]["id"] == "DeepSeek-V4-Flash"
+                assert mock_http.request.call_count == 2
+                assert mock_sleep.await_count == 1
+                assert mock_sleep.await_args.args[0] == pytest.approx(0.01)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_capped_at_sixty_seconds():
+    client = AMDTokenFactoryClient(api_key="rc-test", max_retries=1)
+    response = httpx.Response(429, content=b'{"error": {"message": "Rate limited"}}', headers={"Retry-After": "3600"})
+    success = httpx.Response(200, content=b'{"data": []}', headers={"content-type": "application/json"})
+    mock_http = AsyncMock()
+    mock_http.request = AsyncMock(side_effect=[response, success])
+    mock_http.is_closed = False
+    with patch.object(client, "_get_http_client", return_value=mock_http):
+        with patch.object(amd_client_module, "_wait_for_rate_slot", new_callable=AsyncMock):
+            with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+                await client.list_models()
+    assert sleep.await_args.args[0] == 60.0
 
 
 @pytest.mark.asyncio
 async def test_no_retry_on_400():
     client = AMDTokenFactoryClient(api_key="rc-test", max_retries=3)
-    resp_400 = httpx.Response(
-        status_code=400,
-        content=b'{"error": {"message": "Bad request"}}',
-        headers={"content-type": "application/json"},
-    )
-
+    resp_400 = httpx.Response(400, content=b'{"error": {"message": "Bad request"}}', headers={"content-type": "application/json"})
     mock_http = AsyncMock()
     mock_http.request = AsyncMock(return_value=resp_400)
     mock_http.is_closed = False
-
     with patch.object(client, "_get_http_client", return_value=mock_http):
         with pytest.raises(ValidationException):
             await client.list_models()
-        # Should NOT retry 400
         assert mock_http.request.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_connection_error_raises_service_exception():
     client = AMDTokenFactoryClient(api_key="rc-test", max_retries=1)
-
     mock_http = AsyncMock()
     mock_http.request = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
     mock_http.is_closed = False
-
     with patch.object(client, "_get_http_client", return_value=mock_http):
         with patch("asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(AIServiceException) as exc_info:
@@ -168,25 +150,14 @@ async def test_connection_error_raises_service_exception():
 @pytest.mark.asyncio
 async def test_chat_completion_payload_structure():
     client = AMDTokenFactoryClient(api_key="rc-test", default_model="DeepSeek-V4-Flash")
-    resp_200 = httpx.Response(
-        status_code=200,
-        content=b'{"id": "chat-123", "choices": [{"message": {"role": "assistant", "content": "Hello!"}}]}',
-        headers={"content-type": "application/json"},
-    )
-
+    resp_200 = httpx.Response(200, content=b'{"id": "chat-123", "choices": [{"message": {"role": "assistant", "content": "Hello!"}}]}', headers={"content-type": "application/json"})
     mock_http = AsyncMock()
     mock_http.request = AsyncMock(return_value=resp_200)
     mock_http.is_closed = False
-
     with patch.object(client, "_get_http_client", return_value=mock_http):
-        result = await client.chat_completion(
-            messages=[{"role": "user", "content": "Hi"}],
-            temperature=0.7,
-            max_tokens=100,
-        )
+        result = await client.chat_completion(messages=[{"role": "user", "content": "Hi"}], temperature=0.7, max_tokens=100)
         assert result["id"] == "chat-123"
-        call_kwargs = mock_http.request.call_args.kwargs
-        json_body = call_kwargs["json"]
+        json_body = mock_http.request.call_args.kwargs["json"]
         assert json_body["model"] == "DeepSeek-V4-Flash"
         assert json_body["temperature"] == 0.7
         assert json_body["max_tokens"] == 100

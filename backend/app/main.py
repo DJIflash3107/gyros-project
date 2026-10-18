@@ -1,4 +1,4 @@
-import traceback
+﻿import traceback
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +13,7 @@ from app.middlewares.request_context import RequestContextMiddleware
 # Import routers
 from app.routes import (
     auth_router,
+    background_job_router,
     business_router,
     user_router,
     business_membership_router,
@@ -136,6 +137,7 @@ def read_root():
 
 # Include all routers
 app.include_router(auth_router)
+app.include_router(background_job_router)
 app.include_router(business_router)
 app.include_router(user_router)
 app.include_router(business_membership_router)
@@ -159,3 +161,7 @@ app.include_router(promotion_router)
 app.include_router(direct_promotion_router)
 app.include_router(artifact_router)
 app.include_router(direct_artifact_router)
+
+
+
+

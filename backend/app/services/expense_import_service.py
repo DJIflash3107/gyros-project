@@ -214,12 +214,12 @@ async def import_expenses(
     input_method: str,
     branch_id: Optional[int],
     default_date: Optional[date],
-    persist: bool,
     current_user: User,
+    source_submission_id: Optional[int] = None,
 ) -> ExpenseImportResponse:
     """
-    Import expenses from spreadsheets or photo OCR receipts.
-    Supports dry-run preview (persist=False) and direct saving (persist=True).
+    Import expenses from spreadsheets or photo OCR receipts as draft records
+    pending user review and activation.
     """
     if default_branch_id := branch_id:
         branch = db.query(Branch).filter(Branch.id == default_branch_id, Branch.business_id == business_id).first()
@@ -369,29 +369,30 @@ async def import_expenses(
             description=r.get("description"),
             amount=amt,
             currency=r.get("currency", "IDR"),
+            status="draft",
             source_file_name=r.get("source_file_name"),
             confidence=r.get("confidence"),
             warnings=[],
         )
         preview_items.append(item_preview)
 
-        if persist:
-            exp_model = Expense(
-                business_id=business_id,
-                branch_id=b_id,
-                expense_date=r["expense_date"],
-                category=parsed_category,
-                description=r.get("description"),
-                amount=amt,
-                currency=r.get("currency", "IDR"),
-                source_submission_id=r.get("source_submission_id"),
-                source_row_number=r.get("source_row_number"),
-                created_by_user_id=current_user.id,
-            )
-            items_to_persist.append(exp_model)
+        exp_model = Expense(
+            business_id=business_id,
+            branch_id=b_id,
+            expense_date=r["expense_date"],
+            category=parsed_category,
+            description=r.get("description"),
+            amount=amt,
+            currency=r.get("currency", "IDR"),
+            status="draft",
+            source_submission_id=source_submission_id or r.get("source_submission_id"),
+            source_row_number=r.get("source_row_number"),
+            created_by_user_id=current_user.id,
+        )
+        items_to_persist.append(exp_model)
 
     saved_expenses: List[Expense] = []
-    if persist and items_to_persist:
+    if items_to_persist:
         db.add_all(items_to_persist)
         db.commit()
         for exp in items_to_persist:
@@ -400,17 +401,17 @@ async def import_expenses(
 
     summary = ExpenseImportSummary(
         total_extracted=len(raw_items),
-        total_saved=len(saved_expenses) if persist else 0,
+        total_saved=len(saved_expenses),
         total_amount=total_amount,
         categories_breakdown=categories_breakdown,
         file_name=primary_filename,
         input_method=input_method,
-        persisted=persist,
+        status="draft",
     )
 
     return ExpenseImportResponse(
         summary=summary,
         expenses=[ExpenseResponse.model_validate(e) for e in saved_expenses],
-        items=preview_items if not persist else [],
+        items=preview_items,
         issues=issues,
     )

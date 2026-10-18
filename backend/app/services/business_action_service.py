@@ -147,6 +147,7 @@ def _collect_expense_data(
         .outerjoin(Branch, Branch.id == Expense.branch_id)
         .filter(
             Expense.business_id == business_id,
+            Expense.status == "active",
             Expense.expense_date >= current_start,
         )
     )
@@ -168,6 +169,7 @@ def _collect_expense_data(
         )
         .filter(
             Expense.business_id == business_id,
+            Expense.status == "active",
             Expense.expense_date >= prior_start,
             Expense.expense_date < current_start,
         )

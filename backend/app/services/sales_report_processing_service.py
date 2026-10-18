@@ -655,6 +655,7 @@ def process_file_submission(
                                                 "source_row_number"
                                             ),
                                             created_by_user_id=current_user.id,
+                                            status="draft",
                                         )
                                     )
                                 sheets_processed.append(exp_sheet_name)

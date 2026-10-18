@@ -1,4 +1,4 @@
-from datetime import date
+﻿from datetime import date
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query, File, Form, UploadFile
 from sqlalchemy.orm import Session
@@ -20,7 +20,7 @@ router = APIRouter(
 )
 
 
-@router.post("/process", status_code=201, dependencies=[Depends(require_business_membership())])
+@router.post("/process", status_code=202, dependencies=[Depends(require_business_membership())])
 async def process_submission(
     business_id: int,
     files: Optional[List[UploadFile]] = File(None),
@@ -59,7 +59,7 @@ async def process_submission(
     )
 
 
-@router.post("/batch_form", status_code=201, dependencies=[Depends(require_business_membership())])
+@router.post("/batch_form", status_code=202, dependencies=[Depends(require_business_membership())])
 def batch_form(
     business_id: int,
     data: ManualFormBatchCreate,
@@ -119,7 +119,7 @@ def delete_submission(
     return sales_report_submission_handler.delete_submission_handler(business_id, submission_id, db)
 
 
-@router.post("/{submission_id}/confirm", dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+@router.post("/{submission_id}/confirm", status_code=202, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
 def confirm_submission(
     business_id: int,
     submission_id: int,
@@ -127,3 +127,5 @@ def confirm_submission(
     db: Session = Depends(get_db),
 ):
     return sales_report_submission_handler.confirm_submission_handler(business_id, submission_id, current_user, db)
+
+

@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import String, CHAR, Date, Numeric, ForeignKey, ForeignKeyConstraint, Index, func
+from sqlalchemy import String, CHAR, Date, Numeric, ForeignKey, ForeignKeyConstraint, Index, CheckConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.configs.database import Base
 from app.models.types import BigIntId, IntUnsigned, DateTime6
@@ -20,6 +20,7 @@ class Expense(Base):
     currency: Mapped[str] = mapped_column(CHAR(3), nullable=False, default="IDR")
     source_submission_id: Mapped[Optional[int]] = mapped_column(BigIntId, ForeignKey("sales_report_submissions.id", ondelete="SET NULL"), nullable=True)
     source_row_number: Mapped[Optional[int]] = mapped_column(IntUnsigned, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     created_by_user_id: Mapped[Optional[int]] = mapped_column(BigIntId, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime6, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime6, nullable=False, server_default=func.now(), onupdate=func.now())
@@ -32,7 +33,9 @@ class Expense(Base):
             ondelete="RESTRICT",
             name="fk_expenses_branch_business",
         ),
+        CheckConstraint("status IN ('draft', 'ready', 'active')", name="chk_expenses_status"),
         Index("ix_expenses_biz_date_branch", "business_id", "expense_date", "branch_id"),
+        Index("ix_expenses_biz_status", "business_id", "status"),
     )
 
     # Relationships

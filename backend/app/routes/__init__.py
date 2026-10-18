@@ -1,4 +1,5 @@
-from app.routes.auth_routes import router as auth_router
+﻿from app.routes.auth_routes import router as auth_router
+from app.routes.background_job_routes import router as background_job_router
 from app.routes.business_routes import router as business_router
 from app.routes.user_routes import router as user_router
 from app.routes.business_membership_routes import router as business_membership_router
@@ -21,6 +22,7 @@ from app.routes.artifact_routes import router as artifact_router, direct_router 
 
 __all__ = [
     "auth_router",
+    "background_job_router",
     "business_router",
     "user_router",
     "business_membership_router",
@@ -45,6 +47,12 @@ __all__ = [
     "artifact_router",
     "direct_artifact_router",
 ]
+
+
+
+
+
+
 
 
 

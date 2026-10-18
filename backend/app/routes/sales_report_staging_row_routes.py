@@ -1,6 +1,7 @@
-from typing import Optional
+﻿from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from app.models.user import User
 from app.configs.database import get_db
 from app.models.schemas.sales_report_staging_row import (
     SalesReportStagingRowCreate,
@@ -39,15 +40,15 @@ def list_staging_rows(
     return sales_report_staging_row_handler.list_staging_rows_handler(submission_id, review_status, params, db)
 
 
-@router.patch("/bulk")
-@router.post("/bulk")
+@router.patch("/bulk", status_code=202)
+@router.post("/bulk", status_code=202)
 def bulk_update_staging_rows(
     submission_id: int,
     data: SalesReportStagingRowBulkUpdate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return sales_report_staging_row_handler.bulk_update_staging_rows_handler(submission_id, data, db)
-
+    return sales_report_staging_row_handler.bulk_update_staging_rows_handler(submission_id, data, db, current_user.id)
 
 @router.get("/{row_id}")
 def get_staging_row(
@@ -75,3 +76,8 @@ def delete_staging_row(
     db: Session = Depends(get_db),
 ):
     return sales_report_staging_row_handler.delete_staging_row_handler(submission_id, row_id, db)
+
+
+
+
+

@@ -36,6 +36,7 @@ Read it fully before modifying any code.
 27. [AI-Assisted Promotion Planner](#27-ai-assisted-promotion-planner)
 28. [Artifact & Business File Generation Service](#28-artifact--business-file-generation-service)
 29. [Expense Import via Excel & Photo OCR](#29-expense-import-via-excel--photo-ocr)
+30. [In-Process Background Jobs](#30-in-process-background-jobs)
 
 ---
 
@@ -890,7 +891,7 @@ AMD Gateway (https://developer.amd.com.cn/radeon/api/v1)
 2. **Silently dropped:** `stop`, `seed`, `logit_bias`, `logprobs`, `top_k`, `min_p`, `repetition_penalty`.
 3. **Rejected with 400:** `thinking: {...}` and `reasoning.enabled` (use `reasoning_effort` instead).
 4. **Timeouts:** 10 minutes (600s) default request timeout; 10 minutes max gap between streaming chunks.
-5. **Rate limits:** Per-key 30 RPM, 8 concurrent requests. Shared across the entire team key.
+5. **Rate limits:** AMD documents 20 requests/minute per account and 8 concurrent requests per API key, shared across the team. The client applies process-local pacing (18 RPM) and a concurrency cap (4) as an MVP safety margin. It honors `Retry-After` and retries 429/502/503 with backoff and jitter. This does not coordinate across multiple API processes; run one process for MVP.
 6. **Graceful startup:** If `AMD_API_KEY` is not set, the server starts normally; AI discovery/chat endpoints return standardized 503 (`ERR-AI-501`), and `/api/v1/ai/health` returns `status: "unconfigured"`.
 7. **No placeholder output:** If an AI request fails, always raise the mapped `AppException` subclass. Never mock or return fallback placeholder text to the caller.
 
@@ -1019,7 +1020,7 @@ The backend supports multi-channel ingestion of sales reports across spreadsheet
      ┌───────────────────────────┼───────────────────────────┐
      ▼                           ▼                           ▼
 Spreadsheet (.xlsx/.csv)   Batch Manual Form           Photo / Receipt Image
-(POST .../process)         (POST .../batch_form)       (POST .../process [SSE])
+(POST .../process)         (POST .../batch_form)       (POST .../process; 202 + polling)
      │                           │                           │
      ▼                           ▼                           ▼
 input_profiler.py                │                     photo_extractor.py
@@ -1060,8 +1061,8 @@ spreadsheet_parser.py            │                           │
 | Input Method | Endpoint | Payload Format | Limits & Handling |
 |---|---|---|---|
 | `spreadsheet` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`.xlsx`, `.xls`, `.csv`) | Max 10 MB. SHA-256 duplicate detection. Automatically profiles layout and performs LLM semantic mapping. |
-| `form` (batch) | `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` | `application/json` (`ManualFormBatchCreate`) | 1 to 500 rows per batch. Direct DB staging with product alias resolution and full validation. |
-| `photo` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`image/jpeg`, `image/png`, `image/webp`) | Max 5 MB per image. Supports single file (`file`) or up to 10 image files (`files`). Preserves `source_image_index` and `source_image_name`. Requires vision-capable AMD model. Streams real-time SSE progress events. |
+| `form` (batch) | `POST /api/v1/businesses/{business_id}/sales_report_submissions/batch_form` | `application/json` (`ManualFormBatchCreate`) | 1 to 500 rows per batch. Queued for in-process execution; returns `202` and job status URL. |
+| `photo` | `POST /api/v1/businesses/{business_id}/sales_report_submissions/process` | `multipart/form-data` (`image/jpeg`, `image/png`, `image/webp`) | Max 5 MB per image. Supports single file (`file`) or up to 10 image files (`files`). Preserves `source_image_index` and `source_image_name`. Requires vision-capable AMD model. Returns `202`; poll job status URL for progress and result. |
 
 ### Core Safety Invariants
 
@@ -1098,32 +1099,27 @@ Validation executes 12 sequential checks on all rows across all channels:
 - `pending_review` — Contains warnings, info notices, auto-created draft entities (`RPT-VAL-011`, `RPT-VAL-012`), or originated from vision/OCR. Eligible for confirmation after user inspection and draft activation.
 - `needs_correction` — Contains one or more error-level issues (e.g., empty product name, invalid date, negative quantity). Blocked from confirmation until corrected.
 
-### SSE Progress Streaming (Photo Ingestion)
+### Background Job Progress
 
-When processing photos or when `stream=true`, the endpoint returns a `text/event-stream` with structured progress events:
+Long-running work runs inside API process thread pool, not in a dedicated worker process. Endpoints return HTTP `202 Accepted` with `job_id` and `status_url`; poll `GET /api/v1/businesses/{business_id}/jobs/{job_id}` for `status`, `progress`, `result`, or `error`. Supported states: `queued`, `processing`, `succeeded`, `failed`. The client may disconnect after enqueue; work continues while API process stays alive.
 
-1. `report_status` (`step: "uploading" | "extracting" | "validating" | "staging" | "complete" | "failed"`)
-2. `extraction_progress` (`message: "..."`)
-3. `validation_result` (`total`, `ready`, `pending_review`, `needs_correction`, `errors`)
-4. `report_complete` (`submission_id`, `total_rows`, `accepted_rows`, `rejected_rows`)
-5. `report_error` (`error_code`, `message`)
-
-Terminal event: `data: [DONE]\n\n`.
+Job state is in-memory and is lost on API restart. Use one API process for this MVP; multiple API processes do not share jobs. Do not describe this endpoint as SSE or promise durable execution/retries. Blocking work must stay in the thread pool, never execute on the FastAPI event loop.
 
 ### Endpoints Reference
 
 | Method | Path | Auth / Role | Description |
 |---|---|---|---|
-| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/process` | Member | Process spreadsheet or photo input. Supports `file` or `files` (up to 10 images). |
-| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/batch_form` | Member | Batch manual form submission (up to 500 rows). |
-| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}/confirm` | Owner / Admin / Manager | Confirms staging rows into observations. Cleans up orphan drafts. |
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/process` | Member | Enqueue spreadsheet/photo processing; returns `202`, `job_id`, and `status_url`. Supports `file` or `files` (up to 10 images). |
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/batch_form` | Member | Enqueue manual batch submission (up to 500 rows); returns job status URL. |
+| `POST` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}/confirm` | Owner / Admin / Manager | Enqueue confirmation; poll job status for result. Successful job confirms staging rows and cleans up orphan drafts. |
+| `GET` | `/api/v1/businesses/{b_id}/jobs/{job_id}` | Member | Poll background job status, progress, result, or error. |
 | `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions` | Member | List submissions with pagination and status filter. |
 | `GET` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Member | Get submission details and processing summary. |
 | `PATCH` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Owner / Admin / Manager | Update submission metadata or review note. |
 | `DELETE` | `/api/v1/businesses/{b_id}/sales_report_submissions/{s_id}` | Owner / Admin | Delete submission and cascade delete staging rows. |
 | `GET` | `/api/v1/sales_report_submissions/{s_id}/staging_rows` | Member | List staging rows with review status filter. |
-| `PATCH` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/bulk` | Member | Bulk update staging rows (all or by ID list, e.g. mark `ready`). |
-| `POST` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/bulk` | Member | Alternative method for bulk update. |
+| `PATCH` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/bulk` | Member | Queue bulk update (all or selected rows); returns `202` with a job status URL. |
+| `POST` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/bulk` | Member | Queue bulk update; returns `202` with a job status URL. |
 | `GET` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/{row_id}` | Member | Get single staging row details. |
 | `PATCH` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/{row_id}` | Member | Correct staging row values (e.g. resolve product). |
 | `DELETE` | `/api/v1/sales_report_submissions/{s_id}/staging_rows/{row_id}` | Member | Delete individual staging row. |
@@ -1187,7 +1183,7 @@ During ingestion (spreadsheet, batch form, or multi-photo), if a product or bran
 - Each image is extracted independently through the AMD Vision pipeline.
 - Staging rows track their originating photo via `source_image_index` (1-indexed) and `source_image_name` (e.g. `receipt_p1.jpg`).
 - Extracted rows across all photos are aggregated into a single unified `SalesReportSubmission`.
-- Real-time SSE progress events indicate multi-photo progress during extraction.
+- Internal extraction progress is reflected in the polled job status; the process endpoint does not stream SSE.
 
 ### Auto-Sync Product Price & Cost History on Confirmation
 
@@ -1737,10 +1733,26 @@ The Expense Import module enables automated batch importing and AI vision extrac
 ### Ingestion Channels
 
 1. **Dedicated Expense Import API (`POST /api/v1/businesses/{business_id}/expenses/import`)**:
-   - `input_method="spreadsheet"`: Parses `.xlsx`, `.xls`, or `.csv` files using `expense_spreadsheet_parser.py` and AI semantic mapping.
-   - `input_method="photo"`: Extracts receipt data using AMD Token Factory Vision model (`expense_photo_extractor.py`).
-   - `persist=False`: Dry-run extraction returning preview items (`data.items`) without writing to the database.
-   - `persist=True`: Immediately persists validated rows to the `expenses` table.
+   - Accepts one or more uploads via multipart `files`; legacy single `file` remains supported. `input_method` is `spreadsheet` (default) or `photo`; optional form fields are `branch_id`, `default_date`, and `source_submission_id`.
+   - `input_method="spreadsheet"`: Parses `.xlsx`, `.xls`, or `.csv` files using `expense_spreadsheet_parser.py`; spreadsheet headers use AI semantic mapping with deterministic fallback.
+   - `input_method="photo"`: Extracts receipt data using AMD Token Factory Vision model (`expense_photo_extractor.py`); supported images are JPEG/JPG, PNG, and WebP, with the configured image size limit (`VISION_MAX_IMAGE_SIZE_MB`, default 5 MB).
+   - Route enqueues an `expense_import` job and returns `202 Accepted` with `job_id`, initial `status`, and `status_url`. Poll that URL; terminal job result contains the import summary, persisted expense records, and mapping/parser issues.
+   - Worker stores uploads temporarily, processes them off the request event loop, and removes temporary files after processing. Job state and progress are in-memory only; process restart loses job state. See [In-Process Background Jobs](#30-in-process-background-jobs).
+   - Import always persists extracted expenses as `draft`. The route accepts `persist`, but does not pass it to the handler; it has no effect. This endpoint is not a non-persistent preview.
+   - Optional `branch_id` supplies default branch resolution; file-provided branch ID/name/code is resolved within the business first. Optional `default_date` fills missing transaction dates. Empty/invalid extraction fails the job rather than returning an empty preview.
+   - `source_submission_id` associates imported expenses with a sales-report submission; approval moves linked drafts to `ready`, and successful sales-report confirmation activates them.
+
+   **Example multipart request** (authentication headers omitted):
+   ```bash
+   curl -X POST "http://127.0.0.1:8000/api/v1/businesses/1/expenses/import" \\
+     -F "files=@expenses.xlsx" \\
+     -F "input_method=spreadsheet" \\
+     -F "branch_id=1" \\
+     -F "default_date=2026-01-31"
+   ```
+   Response is `202`; use `data.status_url` to poll the job and inspect `data.result` after success.
+
+   **Review lifecycle:** `GET /expenses?status=draft` lists drafts (default expense listing shows only `active`). Submit `ExpenseReviewRequest` with `expense_ids` to `POST /expenses/approve` or `/expenses/discard`. Approving standalone imported drafts activates them immediately; approving drafts with `source_submission_id` changes status to `ready`, then sales-report confirmation changes them to `active`. Discard deletes only matching draft expenses.
 
 2. **Multi-Sheet Workbook Integration (`sales_report_processing_service.py`)**:
    - Automatically detects sheets with `role="expenses"` via `classify_sheet_roles()`.
@@ -1748,20 +1760,16 @@ The Expense Import module enables automated batch importing and AI vision extrac
    - Saves parsed expenses with `source_submission_id = submission.id`.
    - Populates `summary.expenses_extracted` and `summary.expenses_total_amount`.
 
-### AI Semantic Mapping & Categorization (Primary Strategy)
+### AI Semantic Mapping & Categorization
 
-1. **AI Dynamic Column Mapping (`map_expense_columns_with_llm`)**:
-   - Primary: Uses AMD Token Factory LLMs to map arbitrary raw English or Indonesian column headers to canonical expense fields:
-     `expense_date`, `category`, `description`, `amount`, `branch_name`, `currency`, `receipt_ref`.
-   - Fallback: `build_fallback_expense_mapping()` deterministic pattern matching on known aliases if AI services are disabled or offline.
-
-2. **AI Semantic Categorization (`categorize_expenses_with_llm`)**:
-   - Primary: Analyzes transaction descriptions in batches via LLM and assigns the most accurate category from the 9 standard categories.
-   - Fallback: `normalize_category()` keyword heuristic dictionary fallback if LLM is unreachable.
+- **Column mapping**: `map_expense_columns_with_llm()` maps English or Indonesian headers to canonical fields: `expense_date`, `category`, `description`, `amount`, `branch_name`, `currency`, and `receipt_ref`. If AI mapping is unavailable, `build_fallback_expense_mapping()` applies deterministic aliases.
+- **Category assignment**: `categorize_expenses_with_llm()` classifies descriptions into standard categories. If unavailable, `normalize_category()` uses known labels and keyword matching; unmatched expenses default to `Operations`.
+- Mapping confidence below `SEMANTIC_MAPPING_CONFIDENCE_THRESHOLD` is returned as an issue. Unparseable/missing amounts are skipped and reported; invalid spreadsheets and inputs with no valid rows fail the job. Expense imports have no duplicate-file detection.
+- Spreadsheet parsing supports flexible date and currency formats. Missing dates use `default_date`, then current date. Missing currency defaults to `IDR`; parsed amounts are normalized to non-negative values. Spreadsheet uploads have no explicit size limit in the current parser. Standalone expense imports have no file-count cap; photo size is limited by `VISION_MAX_IMAGE_SIZE_MB` (default 5 MB) per image.
 
 ### Standardized English Expense Categories
 
-All expense categories across models, schemas, AI prompts, and database records are strictly standardized to 9 clean English categories:
+All expense categories across models, schemas, AI prompts, and database records are standardized to these 9 English categories:
 - `Ingredients` — Food items, spices, produce, raw meat, beverages.
 - `Packaging` — Boxes, bags, cups, containers, tape, labels.
 - `Utilities` — Electricity (PLN), water (PDAM), gas (LPG), internet/Wi-Fi.
@@ -1772,28 +1780,22 @@ All expense categories across models, schemas, AI prompts, and database records 
 - `Operations` — POS subscription, transportation/delivery fees, cleaning supplies, POS printer paper.
 - `Other` — Miscellaneous expenses not fitting the above categories.
 
-### Two-Phase Preview $\rightarrow$ Edit $\rightarrow$ Batch Save Workflow
+### Import, Review, and Batch Write Flow
 
-To support workflows where an operator reviews parsed data before committing it to the database:
-
-```
-Step 1: Upload with persist=false
-Client ──► POST /expenses/import (persist=false)
-       ◄── 200 OK: data.items (Preview items, 0 DB records)
-
-Step 2: Client/UI Review & Inline Correction
-User / Frontend edits typo in description, adjusts category or amount in JSON
-
-Step 3: Save Corrected Batch Atomically
-Client ──► POST /expenses/batch ({"items": [corrected_items]})
-       ◄── 201 Created: { summary: { total_saved, total_amount }, expenses: [...] }
+```text
+POST /expenses/import
+  → 202 Accepted { job_id, status, status_url }
+  → poll GET /businesses/{business_id}/jobs/{job_id}
+  → result contains saved draft expenses, summary, and issues
+  → GET /expenses?status=draft
+  → POST /expenses/approve or POST /expenses/discard
 ```
 
-- **`POST /api/v1/businesses/{business_id}/expenses/batch`**:
-  - Request Body: `ExpenseBatchCreate` schema (`items: list[ExpenseCreate]`).
-  - Validation: Verifies business membership, validates that all referenced `branch_id`s belong to the target business, and checks non-negative amounts and valid dates.
-  - Atomicity: Performs all database inserts within a single database transaction. If any item is invalid, the entire batch fails without partial commits.
+The default expense list filters to `active`; request `status=draft` to find imported records. `ExpenseReviewRequest` carries the target `expense_ids`. Approval activates standalone drafts immediately. Drafts linked to a sales-report submission move to `ready`; confirming that submission activates them. Discard deletes only matching drafts.
 
+`persist` remains accepted by the multipart route for compatibility, but the current handler does not receive or use it. Import always persists drafts; it does not provide a dry-run preview.
+
+**Direct batch creation** uses `POST /api/v1/businesses/{business_id}/expenses/batch` with `ExpenseBatchCreate` (`items: list[ExpenseCreate]`, at least one item). It validates all branch IDs belong to the business, then writes the batch in one transaction. Items default to `active` unless a status is supplied. The endpoint queues a background job and returns `202`; it is separate from import review.
 ### Core Components
 
 | Component | File | Responsibility |
@@ -1801,7 +1803,7 @@ Client ──► POST /expenses/batch ({"items": [corrected_items]})
 | Semantic Mapper | `app/services/semantic_mapper.py` | `map_expense_columns_with_llm` and `categorize_expenses_with_llm` for dynamic AI schema mapping and category assignment. |
 | Spreadsheet Parser | `app/services/expense_spreadsheet_parser.py` | Parses `.xlsx` and `.csv` files using semantic column mapping, flexible date parsing, and Indonesian/English currency normalization. |
 | Vision OCR Extractor | `app/services/expense_photo_extractor.py` | Extracts merchant, transaction date, line items, and grand total from receipt/nota photos using AMD Vision AI into English categories. |
-| Import Service | `app/services/expense_import_service.py` | Orchestrates import workflow, invokes AI mapping and categorization, resolves default branches, and handles dry-run preview vs persistence. |
+| Import Service | `app/services/expense_import_service.py` | Orchestrates import workflow, invokes AI mapping and categorization, resolves default branches, and persists imported expenses as drafts. |
 | Expense Service | `app/services/expense_service.py` | Core CRUD operations and `create_expenses_batch()` for atomic multi-row persistence. |
 | Schemas | `app/models/schemas/expense.py` | `ExpenseCreate`, `ExpenseBatchCreate`, `ExpenseResponse`, `ExpenseBatchResponse`. |
 | Routes & Handlers | `app/routes/expense_routes.py`, `app/handlers/expense_handler.py` | `POST .../expenses/import` (multipart upload) and `POST .../expenses/batch` (JSON batch save). |
@@ -1815,3 +1817,13 @@ pytest tests/test_expense_import.py -v
 
 
 
+
+---
+
+## 30. In-Process Background Jobs
+
+Use `app/services/background_job_service.py` for long-running operations already moved off the request path: sales report processing, manual form batches, report confirmation, staging-row bulk updates, expense imports, and expense batch creation. The service stores state in process memory and submits work to a bounded `ThreadPoolExecutor` (`max_workers=4`). `app/services/background_job_worker.py` contains synchronous job dispatch; its blocking database/CPU work must execute only in the executor, never directly inside an async route.
+
+Enqueue endpoints respond `202 Accepted` with `job_id` and `status_url`. Clients poll `GET /api/v1/businesses/{business_id}/jobs/{job_id}`. Status states are `queued`, `processing`, `succeeded`, and `failed`; completed payload is in `result`, and failure message is in `error`. Business membership is required for status access. There is no SSE endpoint, durable queue, retry, or restart recovery in this MVP. Jobs and progress disappear when the API process restarts; run a single API process because in-memory registries are not shared across processes. Uploaded source files are temporarily stored locally and removed after the job finishes.
+
+When adding or changing a background job, test that enqueue returns promptly, another request can proceed while the task runs, polling reports progress and terminal state, errors become `failed`, and non-member business access is rejected.

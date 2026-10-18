@@ -1,10 +1,15 @@
-from datetime import date
+﻿from datetime import date
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query, File, Form, UploadFile
 from sqlalchemy.orm import Session
 from app.configs.database import get_db
 from app.models.user import User
-from app.models.schemas.expense import ExpenseCreate, ExpenseBatchCreate, ExpenseUpdate
+from app.models.schemas.expense import (
+    ExpenseCreate,
+    ExpenseBatchCreate,
+    ExpenseUpdate,
+    ExpenseReviewRequest,
+)
 from app.models.schemas.pagination import PaginationParams
 from app.middlewares.auth import get_current_user, require_business_membership
 from app.handlers import expense_handler
@@ -16,7 +21,7 @@ router = APIRouter(
 )
 
 
-@router.post("/import", status_code=200, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+@router.post("/import", status_code=202, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
 async def import_expenses(
     business_id: int,
     files: Optional[List[UploadFile]] = File(None),
@@ -24,7 +29,8 @@ async def import_expenses(
     input_method: str = Form("spreadsheet"),
     branch_id: Optional[int] = Form(None),
     default_date: Optional[date] = Form(None),
-    persist: bool = Form(True),
+    source_submission_id: Optional[int] = Form(None),
+    persist: Optional[bool] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -45,13 +51,31 @@ async def import_expenses(
         input_method=input_method,
         branch_id=branch_id,
         default_date=default_date,
-        persist=persist,
         current_user=current_user,
         db=db,
+        source_submission_id=source_submission_id,
     )
 
 
-@router.post("/batch", status_code=201, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+@router.post("/approve", status_code=200, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+def approve_expenses(
+    business_id: int,
+    data: ExpenseReviewRequest,
+    db: Session = Depends(get_db),
+):
+    return expense_handler.approve_expenses_handler(business_id, data, db)
+
+
+@router.post("/discard", status_code=200, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
+def discard_expenses(
+    business_id: int,
+    data: ExpenseReviewRequest,
+    db: Session = Depends(get_db),
+):
+    return expense_handler.discard_expenses_handler(business_id, data, db)
+
+
+@router.post("/batch", status_code=202, dependencies=[Depends(require_business_membership(["owner", "admin", "manager"]))])
 def create_expenses_batch(
     business_id: int,
     data: ExpenseBatchCreate,
@@ -80,12 +104,13 @@ def list_expenses(
     business_id: int,
     branch_id: Optional[int] = None,
     category: Optional[str] = None,
+    status: Optional[str] = Query(None, description="Filter by status: draft, ready, active, or all"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     params = PaginationParams(page=page, page_size=page_size)
-    return expense_handler.list_expenses_handler(business_id, branch_id, category, params, db)
+    return expense_handler.list_expenses_handler(business_id, branch_id, category, status, params, db)
 
 
 @router.get("/{expense_id}", dependencies=[Depends(require_business_membership())])
@@ -114,3 +139,4 @@ def delete_expense(
     db: Session = Depends(get_db),
 ):
     return expense_handler.delete_expense_handler(business_id, expense_id, db)
+

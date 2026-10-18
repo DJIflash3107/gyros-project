@@ -174,6 +174,23 @@ def confirm_submission(
             errors={"branches": f"Draft branches must be activated before confirming: {', '.join(draft_names)}"},
         )
 
+    # Check for unreviewed draft expenses linked to this submission
+    from app.models.expense import Expense
+    draft_expenses = (
+        db.query(Expense)
+        .filter(
+            Expense.business_id == business_id,
+            Expense.source_submission_id == submission.id,
+            Expense.status == "draft",
+        )
+        .all()
+    )
+    if draft_expenses:
+        raise ValidationException(
+            message="Cannot confirm submission with unreviewed draft expenses",
+            errors={"expenses": f"{len(draft_expenses)} draft expense(s) linked to this submission must be reviewed before confirming"},
+        )
+
     staging_rows = (
         db.query(SalesReportStagingRow)
         .filter(SalesReportStagingRow.submission_id == submission.id)
@@ -301,6 +318,11 @@ def confirm_submission(
         f"{cleanup_result['products_deleted']} products, "
         f"{cleanup_result['branches_deleted']} branches deleted"
     )
+
+    # Activate linked expenses that are in 'ready' status
+    from app.services.expense_service import activate_expenses_by_submission
+    activated_expenses = activate_expenses_by_submission(db, business_id, submission.id)
+    logger.info(f"Activated {activated_expenses} expenses for submission {submission.id}")
 
     db.commit()
     db.refresh(submission)

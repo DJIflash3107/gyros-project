@@ -13,6 +13,7 @@ class ExpenseCreate(BaseModel):
     currency: str = Field(default="IDR", min_length=3, max_length=3)
     source_submission_id: Optional[int] = None
     source_row_number: Optional[int] = None
+    status: str = Field(default="active", pattern="^(draft|ready|active)$")
 
 
 class ExpenseBatchCreate(BaseModel):
@@ -26,6 +27,7 @@ class ExpenseUpdate(BaseModel):
     description: Optional[str] = Field(default=None, max_length=255)
     amount: Optional[Decimal] = Field(default=None, ge=0)
     currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    status: Optional[str] = Field(default=None, pattern="^(draft|ready|active)$")
 
 
 class ExpenseResponse(BaseModel):
@@ -37,6 +39,7 @@ class ExpenseResponse(BaseModel):
     description: Optional[str] = None
     amount: Decimal
     currency: str
+    status: str = "active"
     source_submission_id: Optional[int] = None
     source_row_number: Optional[int] = None
     created_by_user_id: Optional[int] = None
@@ -55,6 +58,7 @@ class ExpenseImportItem(BaseModel):
     description: Optional[str] = Field(default=None, max_length=255)
     amount: Decimal = Field(..., ge=0)
     currency: str = Field(default="IDR", max_length=3)
+    status: str = "draft"
     source_file_name: Optional[str] = None
     confidence: Optional[float] = None
     warnings: list[str] = Field(default_factory=list)
@@ -67,7 +71,7 @@ class ExpenseImportSummary(BaseModel):
     categories_breakdown: dict[str, Decimal] = Field(default_factory=dict)
     file_name: Optional[str] = None
     input_method: str
-    persisted: bool = True
+    status: str = "draft"
 
 
 class ExpenseImportResponse(BaseModel):
@@ -75,4 +79,15 @@ class ExpenseImportResponse(BaseModel):
     expenses: list[ExpenseResponse] = Field(default_factory=list)
     items: list[ExpenseImportItem] = Field(default_factory=list)
     issues: list[dict] = Field(default_factory=list)
+
+
+class ExpenseReviewRequest(BaseModel):
+    """Request to approve or discard imported draft expenses."""
+    expense_ids: list[int] = Field(..., min_length=1, description="List of expense IDs to review")
+
+
+class ExpenseBulkStatusResponse(BaseModel):
+    updated_count: int
+    expenses: list[ExpenseResponse] = Field(default_factory=list)
+
 

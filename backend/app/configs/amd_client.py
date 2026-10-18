@@ -1,12 +1,15 @@
 import asyncio
 import json
 import random
+import time
+from threading import Lock
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
+
 import httpx
+
 from app.configs.settings import settings
 from app.helpers.error_codes import ErrorCodeRegistry
 from app.helpers.exceptions import (
-    AppException,
     AIConfigException,
     AIRateLimitException,
     AIServiceException,
@@ -15,6 +18,36 @@ from app.helpers.exceptions import (
     ValidationException,
 )
 from app.helpers.logging import logger
+
+
+# Keep a safety margin below AMD's shared 20 RPM account limit.
+_AMD_MIN_REQUEST_INTERVAL = settings.AMD_RATE_LIMIT_WINDOW_SECONDS / settings.AMD_RPM_LIMIT
+_amd_next_request_at = 0.0
+_amd_rate_lock = Lock()
+_amd_request_semaphore = asyncio.Semaphore(settings.AMD_MAX_CONCURRENT_REQUESTS)
+
+
+async def _wait_for_rate_slot() -> None:
+    """Space AMD requests across clients and event loops in this process."""
+    global _amd_next_request_at
+    with _amd_rate_lock:
+        now = time.monotonic()
+        request_at = max(now, _amd_next_request_at)
+        _amd_next_request_at = request_at + _AMD_MIN_REQUEST_INTERVAL
+    delay = request_at - now
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def _reset_rate_limiter_for_tests() -> None:
+    global _amd_next_request_at
+    with _amd_rate_lock:
+        _amd_next_request_at = 0.0
+    while _amd_request_semaphore._value < settings.AMD_MAX_CONCURRENT_REQUESTS:
+        _amd_request_semaphore.release()
+
+
+# This process-local limiter assumes the MVP runs as one API process.
 
 
 class AMDTokenFactoryClient:
@@ -213,13 +246,15 @@ class AMDTokenFactoryClient:
 
         for attempt in range(self.max_retries + 1):
             try:
-                response = await client.request(
-                    method=method,
-                    url=path,
-                    params=params,
-                    json=json_data,
-                    headers=merged_headers,
-                )
+                async with _amd_request_semaphore:
+                    await _wait_for_rate_slot()
+                    response = await client.request(
+                        method=method,
+                        url=path,
+                        params=params,
+                        json=json_data,
+                        headers=merged_headers,
+                    )
 
                 # If status is retryable (429, 502, 503) and we haven't exhausted attempts
                 if response.status_code in (429, 502, 503) and attempt < self.max_retries:
@@ -235,6 +270,8 @@ class AMDTokenFactoryClient:
                         # Exponential backoff with jitter: base * 2^attempt + jitter
                         jitter = random.uniform(0.1, 0.5)
                         delay = min((1.0 * (2 ** attempt)) + jitter, 60.0)
+                    else:
+                        delay = min(delay, 60.0)
 
                     logger.warning(
                         f"AMD API returned {response.status_code} on attempt {attempt + 1}/{self.max_retries + 1}. "
@@ -387,7 +424,9 @@ class AMDTokenFactoryClient:
         headers = self._build_auth_headers()
         headers["Accept"] = "text/event-stream"
 
+        await _amd_request_semaphore.acquire()
         try:
+            await _wait_for_rate_slot()
             # Note: 10 minutes timeout per streaming chunk gap per documentation
             stream_timeout = httpx.Timeout(
                 timeout=float(self.stream_chunk_timeout),
@@ -395,35 +434,38 @@ class AMDTokenFactoryClient:
                 read=float(self.stream_chunk_timeout),
                 write=30.0,
             )
-            async with client.stream(
-                "POST",
-                "/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=stream_timeout,
-            ) as response:
-                if response.is_error:
-                    await response.aread()
-                    self._handle_response_error(response)
+            try:
+                async with client.stream(
+                    "POST",
+                    "/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=stream_timeout,
+                ) as response:
+                    if response.is_error:
+                        await response.aread()
+                        self._handle_response_error(response)
 
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    if line.startswith("data: "):
-                        data_content = line[6:].strip()
-                        if data_content == "[DONE]":
-                            break
-                        yield data_content
-                    else:
-                        yield line
-        except (httpx.ConnectError, httpx.ReadTimeout) as stream_err:
-            logger.error(f"Streaming connection error: {stream_err}")
-            raise AIServiceException(
-                status_code=504,
-                message=f"AMD streaming connection failed or timed out: {str(stream_err)}",
-                errors={"streaming": str(stream_err)},
-                error_code=ErrorCodeRegistry.AI_CONNECTION_ERROR,
-            ) from stream_err
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        if line.startswith("data: "):
+                            data_content = line[6:].strip()
+                            if data_content == "[DONE]":
+                                break
+                            yield data_content
+                        else:
+                            yield line
+            except (httpx.ConnectError, httpx.ReadTimeout) as stream_err:
+                logger.error(f"Streaming connection error: {stream_err}")
+                raise AIServiceException(
+                    status_code=504,
+                    message=f"AMD streaming connection failed or timed out: {str(stream_err)}",
+                    errors={"streaming": str(stream_err)},
+                    error_code=ErrorCodeRegistry.AI_CONNECTION_ERROR,
+                ) from stream_err
+        finally:
+            _amd_request_semaphore.release()
 
 
 # Singleton instance and getter
