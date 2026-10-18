@@ -1,6 +1,6 @@
 import type { ApiEnvelope, AuthToken, User } from "./types";
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL;
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 const TOKEN_KEY = "gyros_token";
 
 export class ApiError extends Error {

@@ -1,4 +1,9 @@
 import { request, requestForm } from "./apiClient";
+import {
+  type EnqueuedJob,
+  type PollJobOptions,
+  waitForEnqueuedJob,
+} from "./backgroundJobs";
 import type {
   Expense,
   ExpenseImportResult,
@@ -17,6 +22,7 @@ export interface ExpenseCreateInput {
   currency?: string;
   source_submission_id?: number | null;
   source_row_number?: number | null;
+  status?: "draft" | "ready" | "active";
 }
 
 export interface ExpenseUpdateInput {
@@ -26,11 +32,13 @@ export interface ExpenseUpdateInput {
   description?: string | null;
   amount?: string;
   currency?: string;
+  status?: "draft" | "ready" | "active";
 }
 
 export interface ListExpensesOptions {
   branchId?: number;
   category?: string;
+  status?: "draft" | "ready" | "active" | "all";
   page?: number;
   pageSize?: number;
 }
@@ -42,6 +50,7 @@ export async function listExpenses(
   const params = new URLSearchParams();
   if (options.branchId) params.set("branch_id", String(options.branchId));
   if (options.category) params.set("category", options.category);
+  if (options.status) params.set("status", options.status);
   if (options.page) params.set("page", String(options.page));
   params.set("page_size", String(options.pageSize ?? 100));
   const query = params.toString();
@@ -79,15 +88,16 @@ export async function createExpense(
 export async function createExpensesBatch(
   businessId: number,
   items: ExpenseCreateInput[],
-): Promise<Expense[]> {
-  const data = await request<{ expenses: Expense[] }>(
+  options: PollJobOptions = {},
+): Promise<{ summary: { total_saved: number; total_amount: number }; expenses: Expense[] }> {
+  const accepted = await request<EnqueuedJob>(
     `/businesses/${businessId}/expenses/batch`,
     {
       method: "POST",
       body: JSON.stringify({ items }),
     },
   );
-  return data.expenses;
+  return waitForEnqueuedJob(businessId, accepted, options);
 }
 
 export async function updateExpense(
@@ -115,17 +125,38 @@ export async function deleteExpense(
   );
 }
 
+export async function approveExpenses(
+  businessId: number,
+  expenseIds: number[],
+): Promise<{ updated_count: number; expenses: Expense[] }> {
+  return request<{ updated_count: number; expenses: Expense[] }>(
+    `/businesses/${businessId}/expenses/approve`,
+    { method: "POST", body: JSON.stringify({ expense_ids: expenseIds }) },
+  );
+}
+
+export async function discardExpenses(
+  businessId: number,
+  expenseIds: number[],
+): Promise<{ deleted_count: number }> {
+  return request<{ deleted_count: number }>(
+    `/businesses/${businessId}/expenses/discard`,
+    { method: "POST", body: JSON.stringify({ expense_ids: expenseIds }) },
+  );
+}
+
 export interface ImportExpensesInput {
   files: File[];
   inputMethod?: string;
   branchId?: number | null;
   defaultDate?: string;
-  persist?: boolean;
+  sourceSubmissionId?: number | null;
 }
 
 export async function importExpenses(
   businessId: number,
   input: ImportExpensesInput,
+  options: PollJobOptions = {},
 ): Promise<ExpenseImportResult> {
   const formData = new FormData();
   for (const file of input.files) {
@@ -138,14 +169,15 @@ export async function importExpenses(
   if (input.defaultDate) {
     formData.append("default_date", input.defaultDate);
   }
-  if (input.persist !== undefined) {
-    formData.append("persist", String(input.persist));
+  if (input.sourceSubmissionId != null) {
+    formData.append("source_submission_id", String(input.sourceSubmissionId));
   }
 
-  return requestForm<ExpenseImportResult>(
+  const accepted = await requestForm<EnqueuedJob>(
     `/businesses/${businessId}/expenses/import`,
     formData,
   );
+  return waitForEnqueuedJob(businessId, accepted, options);
 }
 
 export interface ObservationCreateInput {

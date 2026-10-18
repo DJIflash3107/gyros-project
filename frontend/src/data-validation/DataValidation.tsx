@@ -114,6 +114,7 @@ export default function DataValidation() {
   );
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [jobProgress, setJobProgress] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
 
@@ -246,15 +247,19 @@ export default function DataValidation() {
   };
 
   const handleMarkAllReady = async () => {
-    if (!submission) return;
+    if (!activeBusiness || !submission) return;
     setSaving(true);
     setPageError(null);
     try {
-      const result = await bulkUpdateStagingRows(submission.id, {
+      setJobProgress("Updating all staging rows…");
+      const result = await bulkUpdateStagingRows(activeBusiness.id, submission.id, {
         apply_to_all: true,
         review_status: "ready",
+      }, {
+        onProgress: (job) => setJobProgress(job.progress?.message ?? job.status),
       });
       setRows(result.staging_rows);
+      setJobProgress(null);
       setDrafts(
         Object.fromEntries(
           result.staging_rows.map((row) => [row.id, toDraft(row)]),
@@ -266,6 +271,7 @@ export default function DataValidation() {
         err instanceof ApiError ? err.message : "Failed to mark rows ready",
       );
     } finally {
+      setJobProgress(null);
       setSaving(false);
     }
   };
@@ -293,8 +299,12 @@ export default function DataValidation() {
     if (!activeBusiness || !submission) return;
     setConfirming(true);
     setConfirmError(null);
+    setJobProgress("Queueing submission confirmation…");
     try {
-      await confirmSubmission(activeBusiness.id, submission.id);
+      await confirmSubmission(activeBusiness.id, submission.id, {
+        onProgress: (job) => setJobProgress(job.progress?.message ?? job.status),
+      });
+      setJobProgress(null);
       clearSelection();
       setLoadingList(true);
       await fetchSubmissions();
@@ -306,6 +316,7 @@ export default function DataValidation() {
         setConfirmError("Failed to confirm submission");
       }
     } finally {
+      setJobProgress(null);
       setConfirming(false);
     }
   };
@@ -337,6 +348,11 @@ export default function DataValidation() {
         </button>
       </div>
 
+      {jobProgress && (
+        <p className="mt-4 rounded-lg bg-blue-50 px-4 py-2 text-sm text-blue-800">
+          {jobProgress}
+        </p>
+      )}
       {pageError && (
         <p className="mt-4 rounded-lg bg-rose-50 px-4 py-2 text-sm text-rose-700">
           {pageError}

@@ -1,4 +1,9 @@
-import { ApiError, getToken, request, requestForm } from "./apiClient";
+import { request, requestForm } from "./apiClient";
+import {
+  type EnqueuedJob,
+  type PollJobOptions,
+  waitForEnqueuedJob,
+} from "./backgroundJobs";
 import type {
   InputMethod,
   ManualFormBatchCreate,
@@ -7,8 +12,6 @@ import type {
   ReportPeriodType,
   SalesReportSubmission,
 } from "./types";
-
-const BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
 export interface ProcessUploadInput {
   files: File[];
@@ -22,6 +25,7 @@ export interface ProcessUploadInput {
 export async function processUpload(
   businessId: number,
   input: ProcessUploadInput,
+  options: PollJobOptions = {},
 ): Promise<ProcessingResult> {
   const formData = new FormData();
   for (const file of input.files) {
@@ -35,10 +39,11 @@ export async function processUpload(
     formData.append("branch_id", String(input.branchId));
   }
 
-  return requestForm<ProcessingResult>(
+  const accepted = await requestForm<EnqueuedJob>(
     `/businesses/${businessId}/sales_report_submissions/process`,
     formData,
   );
+  return waitForEnqueuedJob<ProcessingResult>(businessId, accepted, options);
 }
 
 export interface ReportStatusEvent {
@@ -77,111 +82,58 @@ export type StreamEvent =
   | ReportCompleteEvent
   | ReportErrorEvent;
 
-function parseSseChunk(buffer: string): {
-  events: StreamEvent[];
-  rest: string;
-} {
-  const events: StreamEvent[] = [];
-  const blocks = buffer.split("\n\n");
-  const rest = blocks.pop() ?? "";
-  for (const block of blocks) {
-    for (const line of block.split("\n")) {
-      if (line.startsWith("data: ")) {
-        try {
-          events.push(JSON.parse(line.slice(6)) as StreamEvent);
-        } catch {
-          // skip malformed event payloads
-        }
-      }
-    }
-  }
-  return { events, rest };
-}
-
+// Kept as adapter for existing UI; backend processing now reports via job polling.
 export async function processUploadStream(
   businessId: number,
   input: ProcessUploadInput,
   onEvent: (event: StreamEvent) => void,
+  options: PollJobOptions = {},
 ): Promise<void> {
-  const formData = new FormData();
-  for (const file of input.files) {
-    formData.append("files", file);
-  }
-  formData.append("input_method", input.inputMethod);
-  formData.append("report_period_type", input.reportPeriodType);
-  formData.append("coverage_start", input.coverageStart);
-  formData.append("coverage_end", input.coverageEnd);
-  formData.append("stream", "true");
-  if (input.branchId != null) {
-    formData.append("branch_id", String(input.branchId));
-  }
+  const result = await processUpload(businessId, input, {
+    ...options,
+    onProgress: (job) => {
+      options.onProgress?.(job);
+      if (job.progress?.message) {
+        onEvent({
+          event: "report_status",
+          step: job.progress.step ?? "processing",
+          message: job.progress.message,
+        });
+      }
+    },
+  });
 
-  const headers: Record<string, string> = {};
-  const token = getToken();
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-
-  const response = await fetch(
-    `${BASE_URL}/businesses/${businessId}/sales_report_submissions/process`,
-    { method: "POST", headers, body: formData },
-  );
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("text/event-stream")) {
-    // Non-SSE response means an error envelope (or legacy JSON path).
-    let message = "Upload failed";
-    let errors: Record<string, string> = {};
-    try {
-      const envelope = await response.json();
-      message =
-        envelope.message?.error ??
-        Object.values(envelope.error ?? {})[0] ??
-        message;
-      errors = envelope.error ?? {};
-    } catch {
-      // keep defaults
-    }
-    throw new ApiError(response.status, message, errors);
-  }
-
-  if (!response.body) {
-    throw new ApiError(500, "Streaming not supported by the server");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = parseSseChunk(buffer);
-    buffer = parsed.rest;
-    for (const event of parsed.events) {
-      onEvent(event);
-    }
-  }
-
-  buffer += decoder.decode();
-  const parsed = parseSseChunk(buffer);
-  for (const event of parsed.events) {
-    onEvent(event);
-  }
+  onEvent({
+    event: "validation_result",
+    total: result.summary.total_rows,
+    ready: result.summary.ready_rows,
+    pending_review: result.summary.pending_review_rows,
+    needs_correction: result.summary.needs_correction_rows,
+    errors: result.summary.issue_count,
+  });
+  onEvent({
+    event: "report_complete",
+    submission_id: result.submission.id,
+    total_rows: result.summary.total_rows,
+    accepted_rows: result.submission.accepted_rows,
+    rejected_rows: result.submission.rejected_rows,
+    summary: result.summary,
+  });
 }
 
 export async function batchForm(
   businessId: number,
   payload: ManualFormBatchCreate,
+  options: PollJobOptions = {},
 ): Promise<ProcessingResult> {
-  return request<ProcessingResult>(
+  const accepted = await request<EnqueuedJob>(
     `/businesses/${businessId}/sales_report_submissions/batch_form`,
     {
       method: "POST",
       body: JSON.stringify(payload),
     },
   );
+  return waitForEnqueuedJob<ProcessingResult>(businessId, accepted, options);
 }
 
 export interface ListSubmissionsOptions {
@@ -242,12 +194,13 @@ export async function updateSubmission(
 export async function confirmSubmission(
   businessId: number,
   submissionId: number,
+  options: PollJobOptions = {},
 ): Promise<SalesReportSubmission> {
-  const data = await request<{ submission: SalesReportSubmission }>(
+  const accepted = await request<EnqueuedJob>(
     `/businesses/${businessId}/sales_report_submissions/${submissionId}/confirm`,
     { method: "POST" },
   );
-  return data.submission;
+  return waitForEnqueuedJob<SalesReportSubmission>(businessId, accepted, options);
 }
 
 export async function deleteSubmission(

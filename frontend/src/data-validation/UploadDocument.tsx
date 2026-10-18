@@ -119,6 +119,12 @@ export default function UploadDocument() {
             setError(event.message);
           }
         },
+        {
+          onProgress: (job) => {
+            const message = job.progress?.message ?? job.status;
+            setProgress((prev) => prev[prev.length - 1] === message ? prev : [...prev, message]);
+          },
+        },
       );
       if (!failed) {
         setFiles([]);

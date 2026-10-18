@@ -43,6 +43,7 @@ export default function ManualEntry() {
   const [coverageEnd, setCoverageEnd] = useState(today());
   const [rows, setRows] = useState<EntryRow[]>([{ ...EMPTY_ROW }]);
   const [submitting, setSubmitting] = useState(false);
+  const [jobProgress, setJobProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const updateRow = (index: number, field: keyof EntryRow, value: string) => {
@@ -89,19 +90,24 @@ export default function ManualEntry() {
             : Number(row.recorded_revenue),
       }));
 
+      setJobProgress("Queueing manual entry…");
       const result = await batchForm(activeBusiness.id, {
         report_period_type: periodType,
         coverage_start: coverageStart,
         coverage_end: coverageEnd,
         branch_id: Number(effectiveBranchId),
         rows: payloadRows,
+      }, {
+        onProgress: (job) => setJobProgress(job.progress?.message ?? job.status),
       });
+      setJobProgress(null);
       navigate(`/data-validation?submission=${result.submission.id}`);
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : "Failed to submit entries",
       );
     } finally {
+      setJobProgress(null);
       setSubmitting(false);
     }
   };
@@ -244,8 +250,17 @@ export default function ManualEntry() {
           </table>
         </div>
 
+        {jobProgress && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="mt-4 rounded-lg bg-blue-50 px-4 py-2 text-sm text-blue-800"
+          >
+            {jobProgress}
+          </p>
+        )}
         {error && (
-          <p className="mt-4 rounded-lg bg-rose-50 px-4 py-2 text-sm text-rose-700">
+          <p role="alert" className="mt-4 rounded-lg bg-rose-50 px-4 py-2 text-sm text-rose-700">
             {error}
           </p>
         )}

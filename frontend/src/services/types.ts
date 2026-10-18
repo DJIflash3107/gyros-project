@@ -144,6 +144,9 @@ export interface StagingRow {
   submission_id: number;
   source_row_number: number | null;
   source_sheet_name: string | null;
+  source_image_index: number | null;
+  source_image_name: string | null;
+  raw_payload_json: unknown;
   raw_product_name: string | null;
   branch_id: number | null;
   product_id: number | null;
@@ -151,12 +154,20 @@ export interface StagingRow {
   period_end: string | null;
   granularity: Granularity | null;
   prepared_qty: string | null;
+  opening_stock_qty: string | null;
+  received_qty: string | null;
+  available_stock_qty: string | null;
   sold_qty: string | null;
   leftover_qty: string | null;
   spoiled_qty: string | null;
+  damaged_qty: string | null;
+  staff_meals_qty: string | null;
+  donated_qty: string | null;
+  other_disposition_qty: string | null;
   recorded_revenue: string | null;
   unit_price: string | null;
   unit_cost: string | null;
+  extraction_confidence_json: unknown | null;
   review_status: ReviewStatus;
   review_notes: string | null;
   created_at: string;
@@ -171,9 +182,16 @@ export interface ManualFormRowInput {
   period_end: string;
   granularity: Granularity;
   prepared_qty?: number | null;
+  opening_stock_qty?: number | null;
+  received_qty?: number | null;
+  available_stock_qty?: number | null;
   sold_qty?: number | null;
   leftover_qty?: number | null;
   spoiled_qty?: number | null;
+  damaged_qty?: number | null;
+  staff_meals_qty?: number | null;
+  donated_qty?: number | null;
+  other_disposition_qty?: number | null;
   recorded_revenue?: number | null;
 }
 
@@ -246,6 +264,7 @@ export interface Expense {
   description: string | null;
   amount: string;
   currency: string;
+  status: "draft" | "ready" | "active";
   source_submission_id: number | null;
   source_row_number: number | null;
   created_by_user_id: number | null;
@@ -260,7 +279,7 @@ export interface ExpenseImportSummary {
   categories_breakdown: Record<string, string>;
   file_name: string | null;
   input_method: string;
-  persisted: boolean;
+  status: string;
 }
 
 export interface ExpenseImportItem {
